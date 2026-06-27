@@ -303,14 +303,21 @@ route('POST', '/api/logout', (req, res) => {
 }, true);
 
 // ── ML Webhook (public) ────────────────────────────────────
-route('POST', '/ml/webhook', async (req, res) => {
+async function handleWebhook(req, res) {
   const body = await readBody(req).catch(() => ({}));
   db.prepare('INSERT INTO webhooks(topic,resource,user_id,payload) VALUES(?,?,?,?)')
     .run(body.topic || '', body.resource || '', String(body.user_id || ''), JSON.stringify(body));
   if (body.user_id) cacheInvalidate(String(body.user_id));
-  broadcast('webhook', { topic: body.topic });
+  broadcast('webhook', { topic: body.topic, resource: body.resource });
   ok(res, { ok: true });
-}, true);
+}
+
+// Webhook at dedicated path
+route('POST', '/ml/webhook', handleWebhook, true);
+
+// ML also sends notifications to the same callback URL via POST
+// (when both fields point to the same URL)
+route('POST', '/ml/callback', handleWebhook, true);
 
 // ── Stores ─────────────────────────────────────────────────
 route('GET', '/api/stores', (req, res, sess) => {
