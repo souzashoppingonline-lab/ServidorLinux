@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Linux Security Monitor</title>
+    <link rel="stylesheet" href="/css/dashboard.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+    <div id="app">
+        <!-- SIDEBAR -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <span class="logo">🛡️</span>
+                <span class="logo-text">LSM</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#dashboard" class="nav-item active" data-page="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span class="nav-label">Dashboard</span>
+                </a>
+                <a href="#events" class="nav-item" data-page="events">
+                    <span class="nav-icon">🔔</span>
+                    <span class="nav-label">Eventos</span>
+                    <span class="badge" id="critical-badge" style="display:none">0</span>
+                </a>
+                <a href="#metrics" class="nav-item" data-page="metrics">
+                    <span class="nav-icon">📈</span>
+                    <span class="nav-label">Métricas</span>
+                </a>
+                <a href="#integrity" class="nav-item" data-page="integrity">
+                    <span class="nav-icon">🔐</span>
+                    <span class="nav-label">Integridade</span>
+                </a>
+                <a href="#network" class="nav-item" data-page="network">
+                    <span class="nav-icon">🌐</span>
+                    <span class="nav-label">Rede</span>
+                </a>
+                <a href="#risk" class="nav-item" data-page="risk">
+                    <span class="nav-icon">⚠️</span>
+                    <span class="nav-label">Risk Score</span>
+                </a>
+                <a href="#audit" class="nav-item" data-page="audit">
+                    <span class="nav-icon">🔍</span>
+                    <span class="nav-label">Auditoria</span>
+                </a>
+            </nav>
+            <div class="sidebar-footer">
+                <div class="connection-status" id="ws-status">
+                    <span class="dot disconnected"></span>
+                    <span>Desconectado</span>
+                </div>
+                <button class="logout-btn" onclick="logout()">Sair</button>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="main-content">
+            <header class="topbar">
+                <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+                <div class="topbar-info">
+                    <span id="hostname-display">Carregando...</span>
+                    <span class="topbar-time" id="current-time"></span>
+                </div>
+                <div class="risk-badge" id="risk-badge">
+                    <span id="risk-label">RISK: --</span>
+                </div>
+            </header>
+
+            <!-- DASHBOARD PAGE -->
+            <div class="page active" id="page-dashboard">
+                <div class="page-header">
+                    <h1>Dashboard de Segurança</h1>
+                    <span class="last-update">Última atualização: <span id="last-update-time">--</span></span>
+                </div>
+
+                <!-- STAT CARDS -->
+                <div class="stats-grid">
+                    <div class="stat-card critical" id="card-critical">
+                        <div class="stat-icon">🔴</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="stat-critical">0</div>
+                            <div class="stat-label">Eventos Críticos (24h)</div>
+                        </div>
+                    </div>
+                    <div class="stat-card warning" id="card-events">
+                        <div class="stat-icon">🔔</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="stat-events">0</div>
+                            <div class="stat-label">Total Eventos (24h)</div>
+                        </div>
+                    </div>
+                    <div class="stat-card info" id="card-logins">
+                        <div class="stat-icon">🔑</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="stat-logins">0</div>
+                            <div class="stat-label">Tentativas SSH (1h)</div>
+                        </div>
+                    </div>
+                    <div class="stat-card" id="card-integrity">
+                        <div class="stat-icon">📄</div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="stat-integrity">0</div>
+                            <div class="stat-label">Mudanças Integridade (24h)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- RESOURCE GAUGES -->
+                <div class="gauges-row">
+                    <div class="gauge-card">
+                        <h3>CPU</h3>
+                        <div class="gauge-container">
+                            <canvas id="gauge-cpu" width="140" height="80"></canvas>
+                            <div class="gauge-value" id="gauge-cpu-val">--%</div>
+                        </div>
+                    </div>
+                    <div class="gauge-card">
+                        <h3>Memória</h3>
+                        <div class="gauge-container">
+                            <canvas id="gauge-mem" width="140" height="80"></canvas>
+                            <div class="gauge-value" id="gauge-mem-val">--%</div>
+                        </div>
+                    </div>
+                    <div class="gauge-card">
+                        <h3>Disco</h3>
+                        <div class="gauge-container">
+                            <canvas id="gauge-disk" width="140" height="80"></canvas>
+                            <div class="gauge-value" id="gauge-disk-val">--%</div>
+                        </div>
+                    </div>
+                    <div class="gauge-card">
+                        <h3>Risk Score</h3>
+                        <div class="gauge-container">
+                            <canvas id="gauge-risk" width="140" height="80"></canvas>
+                            <div class="gauge-value" id="gauge-risk-val">--</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- CPU CHART -->
+                <div class="charts-row">
+                    <div class="chart-card">
+                        <h3>CPU & Memória (24h)</h3>
+                        <canvas id="chart-resources" height="80"></canvas>
+                    </div>
+                    <div class="chart-card small">
+                        <h3>Eventos por Módulo</h3>
+                        <canvas id="chart-modules" height="80"></canvas>
+                    </div>
+                </div>
+
+                <!-- RECENT EVENTS TABLE -->
+                <div class="table-card">
+                    <div class="table-header">
+                        <h3>Eventos Recentes</h3>
+                        <a href="#events" class="btn-link" onclick="switchPage('events')">Ver todos →</a>
+                    </div>
+                    <div class="table-wrapper">
+                        <table class="events-table">
+                            <thead>
+                                <tr>
+                                    <th>Severidade</th>
+                                    <th>Módulo</th>
+                                    <th>Evento</th>
+                                    <th>Hora</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recent-events-body">
+                                <tr><td colspan="4" class="loading-row">Carregando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- EVENTS PAGE -->
+            <div class="page" id="page-events">
+                <div class="page-header">
+                    <h1>Eventos de Segurança</h1>
+                    <div class="filters">
+                        <select id="filter-severity" onchange="loadEvents()">
+                            <option value="">Todas severidades</option>
+                            <option value="4">Crítico</option>
+                            <option value="3">Alto</option>
+                            <option value="2">Médio</option>
+                            <option value="1">Baixo</option>
+                        </select>
+                        <select id="filter-module" onchange="loadEvents()">
+                            <option value="">Todos módulos</option>
+                            <option value="SSH">SSH</option>
+                            <option value="USERS">Usuários</option>
+                            <option value="PROCESS">Processos</option>
+                            <option value="NETWORK">Rede</option>
+                            <option value="INTEGRITY">Integridade</option>
+                            <option value="FIREWALL">Firewall</option>
+                            <option value="RESOURCES">Recursos</option>
+                            <option value="AUDIT">Auditoria</option>
+                            <option value="DOCKER">Docker</option>
+                        </select>
+                        <button class="btn-primary" onclick="loadEvents()">Atualizar</button>
+                    </div>
+                </div>
+                <div class="table-card">
+                    <div class="table-wrapper">
+                        <table class="events-table full-table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Sev.</th>
+                                    <th>Módulo</th>
+                                    <th>Tipo</th>
+                                    <th>Título</th>
+                                    <th>IP</th>
+                                    <th>Usuário</th>
+                                    <th>Risk</th>
+                                    <th>Hora</th>
+                                    <th>Ação</th>
+                                </tr>
+                            </thead>
+                            <tbody id="events-body">
+                                <tr><td colspan="10" class="loading-row">Carregando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination">
+                        <button id="prev-page" onclick="changePage(-1)">← Anterior</button>
+                        <span id="page-info">Página 1</span>
+                        <button id="next-page" onclick="changePage(1)">Próxima →</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- METRICS PAGE -->
+            <div class="page" id="page-metrics">
+                <div class="page-header">
+                    <h1>Métricas do Sistema</h1>
+                    <select id="metrics-period" onchange="loadMetrics()">
+                        <option value="1">Última hora</option>
+                        <option value="6">6 horas</option>
+                        <option value="24" selected>24 horas</option>
+                        <option value="72">3 dias</option>
+                        <option value="168">7 dias</option>
+                    </select>
+                </div>
+                <div class="charts-full">
+                    <div class="chart-card full">
+                        <h3>Uso de CPU (%)</h3>
+                        <canvas id="chart-cpu-hist" height="60"></canvas>
+                    </div>
+                    <div class="chart-card full">
+                        <h3>Uso de Memória (%)</h3>
+                        <canvas id="chart-mem-hist" height="60"></canvas>
+                    </div>
+                    <div class="chart-card full">
+                        <h3>Risk Score</h3>
+                        <canvas id="chart-risk-hist" height="60"></canvas>
+                    </div>
+                </div>
+                <div class="table-card">
+                    <h3>Discos</h3>
+                    <div class="table-wrapper">
+                        <table class="events-table">
+                            <thead><tr><th>Dispositivo</th><th>Mount</th><th>Tamanho</th><th>Usado</th><th>Livre</th><th>Uso</th></tr></thead>
+                            <tbody id="disks-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- INTEGRITY PAGE -->
+            <div class="page" id="page-integrity">
+                <div class="page-header">
+                    <h1>Monitor de Integridade</h1>
+                    <button class="btn-primary" onclick="refreshIntegrity()">Atualizar</button>
+                </div>
+                <div class="stats-grid mini">
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-value" id="integrity-baseline-count">--</div>
+                            <div class="stat-label">Arquivos no Baseline</div>
+                        </div>
+                    </div>
+                    <div class="stat-card critical">
+                        <div class="stat-content">
+                            <div class="stat-value" id="integrity-changes-count">--</div>
+                            <div class="stat-label">Mudanças Detectadas</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="table-card">
+                    <h3>Histórico de Mudanças</h3>
+                    <div class="table-wrapper">
+                        <table class="events-table">
+                            <thead>
+                                <tr><th>Arquivo</th><th>Tipo</th><th>Hash Anterior</th><th>Hash Atual</th><th>Data</th></tr>
+                            </thead>
+                            <tbody id="integrity-body">
+                                <tr><td colspan="5" class="loading-row">Carregando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- NETWORK PAGE -->
+            <div class="page" id="page-network">
+                <div class="page-header">
+                    <h1>Monitor de Rede</h1>
+                    <button class="btn-primary" onclick="refreshNetwork()">Atualizar</button>
+                </div>
+                <div class="table-card">
+                    <h3>Eventos de Rede (24h)</h3>
+                    <div class="table-wrapper">
+                        <table class="events-table">
+                            <thead>
+                                <tr><th>Tipo</th><th>Título</th><th>IP Origem</th><th>Risk</th><th>Hora</th></tr>
+                            </thead>
+                            <tbody id="network-body">
+                                <tr><td colspan="5" class="loading-row">Carregando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RISK PAGE -->
+            <div class="page" id="page-risk">
+                <div class="page-header">
+                    <h1>Risk Score</h1>
+                </div>
+                <div class="risk-display">
+                    <div class="risk-gauge-big">
+                        <canvas id="gauge-risk-big" width="250" height="140"></canvas>
+                        <div class="risk-score-display">
+                            <span id="risk-score-big">--</span>
+                            <span>/100</span>
+                        </div>
+                        <div class="risk-level-display" id="risk-level-big">--</div>
+                    </div>
+                </div>
+                <div class="chart-card full">
+                    <h3>Risk Score Histórico (24h)</h3>
+                    <canvas id="chart-risk-big" height="60"></canvas>
+                </div>
+                <div class="table-card">
+                    <h3>Fatores de Risco</h3>
+                    <div class="risk-factors" id="risk-factors"></div>
+                </div>
+            </div>
+
+            <!-- AUDIT PAGE -->
+            <div class="page" id="page-audit">
+                <div class="page-header">
+                    <h1>Auditoria do Sistema</h1>
+                    <button class="btn-primary" onclick="refreshAudit()">Atualizar</button>
+                </div>
+                <div class="table-card">
+                    <h3>Eventos de Auditoria (24h)</h3>
+                    <div class="table-wrapper">
+                        <table class="events-table">
+                            <thead>
+                                <tr><th>Tipo</th><th>Título</th><th>Severidade</th><th>Hora</th></tr>
+                            </thead>
+                            <tbody id="audit-body">
+                                <tr><td colspan="4" class="loading-row">Carregando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- EVENT DETAIL MODAL -->
+    <div class="modal-overlay" id="modal-overlay" onclick="closeModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3 id="modal-title">Detalhes do Evento</h3>
+                <button onclick="closeModal()">✕</button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+        </div>
+    </div>
+
+    <!-- TOAST NOTIFICATIONS -->
+    <div id="toast-container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="/js/dashboard.js"></script>
+</body>
+</html>

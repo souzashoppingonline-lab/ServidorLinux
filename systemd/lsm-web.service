@@ -1,0 +1,23 @@
+[Unit]
+Description=Linux Security Monitor - Web Dashboard
+After=lsm-monitor.service
+Requires=lsm-monitor.service
+
+[Service]
+Type=simple
+User=lsm
+Group=lsm
+WorkingDirectory=/opt/linux-security-monitor/web
+EnvironmentFile=/opt/linux-security-monitor/config/monitor.conf
+ExecStart=/usr/bin/node /opt/linux-security-monitor/web/src/server.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/lsm/web.log
+StandardError=append:/var/log/lsm/web.log
+ReadOnlyPaths=/opt/linux-security-monitor
+ReadWritePaths=/var/log/lsm
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

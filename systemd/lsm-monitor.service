@@ -1,0 +1,25 @@
+[Unit]
+Description=Linux Security Monitor - Main Monitor
+After=network.target auditd.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/linux-security-monitor
+ExecStart=/bin/bash /opt/linux-security-monitor/scripts/monitor.sh loop
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+StandardOutput=append:/var/log/lsm/monitor.log
+StandardError=append:/var/log/lsm/monitor.log
+LimitNOFILE=65536
+PrivateTmp=true
+NoNewPrivileges=false
+ProtectSystem=false
+
+[Install]
+WantedBy=multi-user.target
