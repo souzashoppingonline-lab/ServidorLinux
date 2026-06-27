@@ -47,6 +47,11 @@ const Database = require('better-sqlite3');
 let db;
 
 function initDb() {
+    if (!fs.existsSync(DB_FILE)) {
+        console.warn(`DB not found at ${DB_FILE} — dashboard will show empty data until monitor runs.`);
+        db = null;
+        return;
+    }
     try {
         db = new Database(DB_FILE, { readonly: true });
         db.pragma('journal_mode = WAL');
