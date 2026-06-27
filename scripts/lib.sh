@@ -95,7 +95,10 @@ log_critical() { log "CRITICAL" "${1}" "${2:-}"; }
 # DATABASE
 # ============================================================
 db_init() {
-    mkdir -p "${LSM_DATA_DIR}"
+    if ! mkdir -p "${LSM_DATA_DIR}" 2>/dev/null; then
+        log_error "Cannot create data directory ${LSM_DATA_DIR} (run as root or check permissions)" "DB"
+        return 1
+    fi
     sqlite3 "${LSM_DB_FILE}" <<'ENDSQL'
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -180,6 +183,10 @@ ENDSQL
 }
 
 db_exec() {
+    if [[ ! -f "${LSM_DB_FILE}" ]]; then
+        log_error "Database file not found: ${LSM_DB_FILE}. Run lsm_init first." "DB"
+        return 1
+    fi
     sqlite3 "${LSM_DB_FILE}" "${@}"
 }
 
@@ -417,6 +424,9 @@ ensure_commands() {
 # ============================================================
 lsm_init() {
     load_config
-    mkdir -p "${LSM_LOG_DIR}" "${LSM_DATA_DIR}" "${LSM_LOCK_DIR}"
-    db_init
+    mkdir -p "${LSM_LOG_DIR}" "${LSM_DATA_DIR}" "${LSM_LOCK_DIR}" 2>/dev/null || true
+    db_init || {
+        echo "[ERROR] Failed to initialize database. Run as root or set LSM_DATA_DIR to a writable path." >&2
+        return 1
+    }
 }
