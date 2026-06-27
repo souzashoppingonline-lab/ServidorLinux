@@ -73,6 +73,14 @@
                 <span class="nav-icon">🔒</span>
                 <span class="nav-label">SSL &amp; Backups</span>
             </a>
+
+            <div class="nav-section">Configurações</div>
+
+            <a class="nav-item" data-page="telegram">
+                <span class="nav-icon">✈️</span>
+                <span class="nav-label">Telegram</span>
+                <span class="nav-badge telegram-badge" id="badge-telegram" style="display:none">!</span>
+            </a>
         </nav>
 
         <div class="sidebar-footer">
@@ -640,6 +648,160 @@
                 <div style="margin-top:0.75rem;font-size:0.72rem;color:var(--text-muted)">
                     Total (últ. 1000 linhas): <span id="nginx-total-reqs">--</span> reqs |
                     Tempo médio resp.: <span id="nginx-avg-time">--</span>s
+                </div>
+            </div>
+        </div>
+
+        <!-- ====================================================
+             PAGE: TELEGRAM
+             ==================================================== -->
+        <div class="page" id="page-telegram">
+            <div class="page-header">
+                <h1>✈️ Configuração Telegram</h1>
+                <span class="last-update">Alertas automáticos via bot</span>
+            </div>
+
+            <!-- Status Card -->
+            <div class="glass-card" style="margin-bottom:1.5rem">
+                <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+                    <div>
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.25rem">Status</div>
+                        <div id="tg-status-badge" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.4rem 1rem;border-radius:2rem;font-weight:600;font-size:0.85rem;background:rgba(255,71,87,0.15);color:#ff4757">
+                            <span>●</span> Desativado
+                        </div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.25rem">Bot</div>
+                        <div id="tg-bot-name" style="font-weight:500;color:var(--text-primary)">—</div>
+                    </div>
+                    <div>
+                        <div style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.25rem">Chat ID</div>
+                        <div id="tg-chat-display" style="font-weight:500;color:var(--text-primary)">—</div>
+                    </div>
+                    <div style="margin-left:auto;display:flex;gap:0.75rem">
+                        <button class="btn btn-ghost" onclick="loadTelegramConfig()">🔄 Atualizar</button>
+                        <button class="btn btn-primary" onclick="testTelegram()">📨 Enviar Teste</button>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.5rem">
+
+                <!-- Configuração do Bot -->
+                <div class="glass-card">
+                    <h3 style="margin-bottom:1.25rem;font-size:1rem;color:var(--text-primary)">🤖 Configuração do Bot</h3>
+
+                    <div class="form-group">
+                        <label class="form-label">Ativar Alertas Telegram</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="tg-enabled">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Token do Bot
+                            <a href="https://t.me/BotFather" target="_blank" style="color:var(--accent-blue);font-size:0.75rem;margin-left:0.5rem">→ Obter no @BotFather</a>
+                        </label>
+                        <div style="display:flex;gap:0.5rem">
+                            <input type="password" class="form-input" id="tg-token" placeholder="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11">
+                            <button class="btn btn-ghost" onclick="toggleTokenVisibility()" title="Mostrar/ocultar">👁</button>
+                        </div>
+                        <div class="form-hint">Crie um bot em @BotFather e copie o token gerado</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Chat ID
+                            <a href="https://t.me/userinfobot" target="_blank" style="color:var(--accent-blue);font-size:0.75rem;margin-left:0.5rem">→ Obter no @userinfobot</a>
+                        </label>
+                        <input type="text" class="form-input" id="tg-chat-id" placeholder="-1001234567890 ou 123456789">
+                        <div class="form-hint">ID do seu chat ou grupo. Grupos têm ID negativo</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Relatório Diário</label>
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="tg-daily-report">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <div class="form-hint">Envia resumo diário às 08h</div>
+                    </div>
+
+                    <button class="btn btn-primary" style="width:100%;margin-top:0.5rem" onclick="saveTelegramConfig()">
+                        💾 Salvar Configuração
+                    </button>
+                </div>
+
+                <!-- Limites de Alerta -->
+                <div class="glass-card">
+                    <h3 style="margin-bottom:1.25rem;font-size:1rem;color:var(--text-primary)">⚠️ Limites de Alerta</h3>
+
+                    <div class="form-group">
+                        <label class="form-label">CPU — Alertar acima de <span id="tg-cpu-val">90</span>%</label>
+                        <input type="range" class="form-range" id="tg-cpu-threshold" min="50" max="99" value="90"
+                               oninput="document.getElementById('tg-cpu-val').textContent=this.value">
+                        <div class="range-labels"><span>50%</span><span>99%</span></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Memória RAM — Alertar acima de <span id="tg-mem-val">90</span>%</label>
+                        <input type="range" class="form-range" id="tg-mem-threshold" min="50" max="99" value="90"
+                               oninput="document.getElementById('tg-mem-val').textContent=this.value">
+                        <div class="range-labels"><span>50%</span><span>99%</span></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Disco — Alertar acima de <span id="tg-disk-val">90</span>%</label>
+                        <input type="range" class="form-range" id="tg-disk-threshold" min="50" max="99" value="90"
+                               oninput="document.getElementById('tg-disk-val').textContent=this.value">
+                        <div class="range-labels"><span>50%</span><span>99%</span></div>
+                    </div>
+
+                    <div class="form-hint" style="margin-top:1rem">
+                        ⏱ Cooldown de 15 minutos entre alertas do mesmo tipo para evitar spam.
+                    </div>
+
+                    <!-- Tipos de alerta -->
+                    <div style="margin-top:1.5rem">
+                        <div style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.75rem">Tipos de alerta automático:</div>
+                        <div class="alert-type-list">
+                            <div class="alert-type-item">🔴 SSH brute force detectado</div>
+                            <div class="alert-type-item">🔴 Login root via SSH</div>
+                            <div class="alert-type-item">🔴 Arquivo crítico alterado</div>
+                            <div class="alert-type-item">🟡 CPU acima do limite</div>
+                            <div class="alert-type-item">🟡 Memória acima do limite</div>
+                            <div class="alert-type-item">🟡 Disco acima do limite</div>
+                            <div class="alert-type-item">📊 Relatório diário</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Instruções -->
+            <div class="glass-card" style="margin-top:1.5rem">
+                <h3 style="margin-bottom:1rem;font-size:0.95rem;color:var(--text-primary)">📖 Como configurar</h3>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1.25rem">
+                    <div class="step-card">
+                        <div class="step-number">1</div>
+                        <div class="step-text">Abra o Telegram e pesquise <strong>@BotFather</strong></div>
+                    </div>
+                    <div class="step-card">
+                        <div class="step-number">2</div>
+                        <div class="step-text">Envie <code>/newbot</code>, escolha um nome e copie o <strong>token</strong></div>
+                    </div>
+                    <div class="step-card">
+                        <div class="step-number">3</div>
+                        <div class="step-text">Pesquise <strong>@userinfobot</strong> e envie qualquer mensagem para obter seu <strong>Chat ID</strong></div>
+                    </div>
+                    <div class="step-card">
+                        <div class="step-number">4</div>
+                        <div class="step-text">Cole o token e o chat ID aqui, ative e clique em <strong>Salvar</strong></div>
+                    </div>
+                    <div class="step-card">
+                        <div class="step-number">5</div>
+                        <div class="step-text">Clique em <strong>Enviar Teste</strong> para confirmar que está funcionando</div>
+                    </div>
                 </div>
             </div>
         </div>

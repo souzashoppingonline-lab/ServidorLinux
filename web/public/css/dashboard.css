@@ -1210,3 +1210,138 @@ select:focus, input:focus {
 .mt-1 { margin-top: 0.25rem; }
 .mt-2 { margin-top: 0.5rem; }
 .mt-3 { margin-top: 0.875rem; }
+
+/* ============================================================
+   TELEGRAM PAGE
+   ============================================================ */
+.form-group { margin-bottom: 1.25rem; }
+
+.form-label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.form-input {
+    width: 100%;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid var(--glass-border-strong);
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 0.875rem;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-family: inherit;
+    transition: border-color var(--transition);
+    box-sizing: border-box;
+}
+.form-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 3px rgba(79,142,247,0.12);
+}
+.form-input::placeholder { color: var(--text-muted); }
+
+.form-hint {
+    font-size: 0.73rem;
+    color: var(--text-muted);
+    margin-top: 0.35rem;
+}
+
+.form-range {
+    width: 100%;
+    height: 4px;
+    -webkit-appearance: none;
+    background: rgba(255,255,255,0.1);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+}
+.form-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--accent-blue);
+    cursor: pointer;
+    box-shadow: 0 0 0 3px rgba(79,142,247,0.2);
+}
+.range-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+}
+
+/* Toggle switch */
+.toggle-switch {
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    gap: 0.5rem;
+}
+.toggle-switch input { display: none; }
+.toggle-slider {
+    position: relative;
+    width: 44px; height: 24px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 12px;
+    transition: background var(--transition);
+}
+.toggle-slider::after {
+    content: '';
+    position: absolute;
+    left: 3px; top: 3px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: transform var(--transition), background var(--transition);
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--accent-blue); }
+.toggle-switch input:checked + .toggle-slider::after {
+    transform: translateX(20px);
+    background: #fff;
+}
+
+/* Alert type list */
+.alert-type-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.alert-type-item {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    padding: 0.35rem 0.6rem;
+    background: rgba(255,255,255,0.03);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+}
+
+/* Step cards */
+.step-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.875rem;
+    padding: 0.875rem;
+    background: rgba(255,255,255,0.03);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--glass-border);
+}
+.step-number {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--accent-blue);
+    color: #fff;
+    font-weight: 700;
+    font-size: 0.85rem;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+.step-text { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.5; }
+.step-text code {
+    background: rgba(79,142,247,0.15);
+    color: var(--accent-blue);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+}
+
+.telegram-badge { background: var(--accent-orange) !important; }

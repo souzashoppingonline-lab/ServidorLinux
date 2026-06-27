@@ -497,6 +497,7 @@ function switchPage(page) {
         case 'processos':  loadProcessos(); break;
         case 'disco':      loadDisco(); break;
         case 'ssl':        loadSsl(); break;
+        case 'telegram':   loadTelegramConfig(); break;
     }
 }
 
@@ -1238,3 +1239,126 @@ document.addEventListener('DOMContentLoaded', () => {
         Object.values(charts).forEach(c => { try { c.resize(); } catch {} });
     });
 });
+
+// ============================================================
+// TELEGRAM PAGE
+// ============================================================
+async function loadTelegramConfig() {
+    try {
+        const data = await apiFetch('/api/telegram/config');
+
+        // Status badge
+        const badge = document.getElementById('tg-status-badge');
+        if (data.enabled && data.has_token && data.has_chat_id) {
+            badge.style.background = 'rgba(0,212,161,0.15)';
+            badge.style.color = '#00d4a1';
+            badge.innerHTML = '<span>●</span> Ativo';
+            document.getElementById('badge-telegram').style.display = 'none';
+        } else {
+            badge.style.background = 'rgba(255,71,87,0.15)';
+            badge.style.color = '#ff4757';
+            badge.innerHTML = '<span>●</span> Desativado';
+            if (!data.has_token || !data.has_chat_id) {
+                document.getElementById('badge-telegram').style.display = 'flex';
+            }
+        }
+
+        // Bot info
+        document.getElementById('tg-bot-name').textContent = data.has_token ? data.bot_token : '—';
+        document.getElementById('tg-chat-display').textContent = data.chat_id || '—';
+
+        // Form fields
+        document.getElementById('tg-enabled').checked = data.enabled;
+        document.getElementById('tg-daily-report').checked = data.daily_report;
+        document.getElementById('tg-chat-id').value = data.chat_id || '';
+
+        const cpuThresh = data.alert_cpu || 90;
+        const memThresh = data.alert_mem || 90;
+        const diskThresh = data.alert_disk || 90;
+        document.getElementById('tg-cpu-threshold').value = cpuThresh;
+        document.getElementById('tg-mem-threshold').value = memThresh;
+        document.getElementById('tg-disk-threshold').value = diskThresh;
+        document.getElementById('tg-cpu-val').textContent = cpuThresh;
+        document.getElementById('tg-mem-val').textContent = memThresh;
+        document.getElementById('tg-disk-val').textContent = diskThresh;
+
+        // Don't pre-fill token for security (shows masked)
+        document.getElementById('tg-token').placeholder = data.has_token
+            ? `Token atual: ${data.bot_token} (deixe em branco para manter)`
+            : '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11';
+
+    } catch (e) {
+        showToast('Erro ao carregar configuração Telegram', 'error');
+    }
+}
+
+async function saveTelegramConfig() {
+    const token = document.getElementById('tg-token').value.trim();
+    const chatId = document.getElementById('tg-chat-id').value.trim();
+    const enabled = document.getElementById('tg-enabled').checked;
+    const dailyReport = document.getElementById('tg-daily-report').checked;
+    const cpuThresh = document.getElementById('tg-cpu-threshold').value;
+    const memThresh = document.getElementById('tg-mem-threshold').value;
+    const diskThresh = document.getElementById('tg-disk-threshold').value;
+
+    const payload = {
+        TELEGRAM_ENABLED: enabled ? 'true' : 'false',
+        TELEGRAM_CHAT_ID: chatId,
+        TELEGRAM_ALERT_CPU: cpuThresh,
+        TELEGRAM_ALERT_MEM: memThresh,
+        TELEGRAM_ALERT_DISK: diskThresh,
+        TELEGRAM_DAILY_REPORT: dailyReport ? 'true' : 'false',
+    };
+    if (token) payload.TELEGRAM_BOT_TOKEN = token;
+
+    try {
+        const res = await fetch('/api/telegram/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            showToast('Configuração salva com sucesso!', 'success');
+            // Clear token field for security
+            document.getElementById('tg-token').value = '';
+            await loadTelegramConfig();
+        } else {
+            showToast('Erro ao salvar: ' + (data.error || 'desconhecido'), 'error');
+        }
+    } catch (e) {
+        showToast('Erro de conexão ao salvar', 'error');
+    }
+}
+
+async function testTelegram() {
+    const token = document.getElementById('tg-token').value.trim();
+    const chatId = document.getElementById('tg-chat-id').value.trim();
+
+    showToast('Enviando mensagem de teste...', 'info');
+
+    try {
+        const payload = {};
+        if (token) payload.token = token;
+        if (chatId) payload.chat_id = chatId;
+
+        const res = await fetch('/api/telegram/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            showToast(`✅ Mensagem enviada! Bot: @${data.bot_name}`, 'success');
+        } else {
+            showToast('❌ Falha: ' + (data.error || 'Verifique token e chat ID'), 'error');
+        }
+    } catch (e) {
+        showToast('Erro de conexão ao testar', 'error');
+    }
+}
+
+function toggleTokenVisibility() {
+    const inp = document.getElementById('tg-token');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+}

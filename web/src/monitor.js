@@ -477,6 +477,140 @@ async function getNginxStats() {
 }
 
 // ============================================================
+// TELEGRAM
+// ============================================================
+const https = require('https');
+
+function telegramSend(token, chatId, text) {
+    return new Promise((resolve, reject) => {
+        const body = JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: 'Markdown',
+            disable_web_page_preview: true,
+        });
+        const req = https.request({
+            hostname: 'api.telegram.org',
+            path: `/bot${token}/sendMessage`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }, (res) => {
+            let data = '';
+            res.on('data', d => { data += d; });
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { resolve({ ok: false }); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
+        req.write(body);
+        req.end();
+    });
+}
+
+function telegramGetMe(token) {
+    return new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: 'api.telegram.org',
+            path: `/bot${token}/getMe`,
+            method: 'GET',
+        }, (res) => {
+            let data = '';
+            res.on('data', d => { data += d; });
+            res.on('end', () => {
+                try { resolve(JSON.parse(data)); }
+                catch { resolve({ ok: false }); }
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
+        req.end();
+    });
+}
+
+function saveConfigValue(key, value) {
+    try {
+        let content = '';
+        try { content = fs.readFileSync(CONFIG_FILE, 'utf8'); } catch { content = ''; }
+        const escaped = value.replace(/[\/&]/g, c => `\\${c}`);
+        if (content.includes(`${key}=`)) {
+            content = content.replace(new RegExp(`^${key}=.*$`, 'm'), `${key}="${value}"`);
+        } else {
+            content += `\n${key}="${value}"`;
+        }
+        fs.mkdirSync(require('path').dirname(CONFIG_FILE), { recursive: true });
+        fs.writeFileSync(CONFIG_FILE, content, 'utf8');
+        return true;
+    } catch (err) {
+        console.error('saveConfigValue error:', err.message);
+        return false;
+    }
+}
+
+// Telegram alert thresholds check (called from pushUpdates)
+let lastTelegramAlerts = {};
+async function checkAndSendAlerts(metrics) {
+    if (config.TELEGRAM_ENABLED !== 'true') return;
+    const token = config.TELEGRAM_BOT_TOKEN;
+    const chatId = config.TELEGRAM_CHAT_ID;
+    if (!token || !chatId) return;
+
+    const now = Date.now();
+    const cooldown = 15 * 60 * 1000; // 15 min per alert type
+
+    const threshold_cpu = parseInt(config.TELEGRAM_ALERT_CPU || '90');
+    const threshold_mem = parseInt(config.TELEGRAM_ALERT_MEM || '90');
+    const threshold_disk = parseInt(config.TELEGRAM_ALERT_DISK || '90');
+
+    // CPU alert
+    if (metrics.cpu >= threshold_cpu) {
+        if (!lastTelegramAlerts.cpu || now - lastTelegramAlerts.cpu > cooldown) {
+            lastTelegramAlerts.cpu = now;
+            telegramSend(token, chatId,
+                `🟡 *AVISO — CPU Alta*\n` +
+                `🖥️ Servidor: \`${os.hostname()}\`\n` +
+                `📊 CPU: *${metrics.cpu.toFixed(1)}%* (limite: ${threshold_cpu}%)\n` +
+                `🕐 ${new Date().toLocaleString('pt-BR')}`
+            ).catch(() => {});
+        }
+    } else { delete lastTelegramAlerts.cpu; }
+
+    // Memory alert
+    if (metrics.memory && metrics.memory.percent >= threshold_mem) {
+        if (!lastTelegramAlerts.mem || now - lastTelegramAlerts.mem > cooldown) {
+            lastTelegramAlerts.mem = now;
+            telegramSend(token, chatId,
+                `🟡 *AVISO — Memória Alta*\n` +
+                `🖥️ Servidor: \`${os.hostname()}\`\n` +
+                `📊 RAM: *${metrics.memory.percent.toFixed(1)}%* (${metrics.memory.used}/${metrics.memory.total} MB)\n` +
+                `🕐 ${new Date().toLocaleString('pt-BR')}`
+            ).catch(() => {});
+        }
+    } else { delete lastTelegramAlerts.mem; }
+
+    // Disk alert (check first disk)
+    try {
+        const disks = await getDiskMetrics();
+        for (const disk of disks) {
+            const key = `disk_${disk.mount}`;
+            if (disk.percent >= threshold_disk) {
+                if (!lastTelegramAlerts[key] || now - lastTelegramAlerts[key] > cooldown) {
+                    lastTelegramAlerts[key] = now;
+                    telegramSend(token, chatId,
+                        `🟡 *AVISO — Disco Quase Cheio*\n` +
+                        `🖥️ Servidor: \`${os.hostname()}\`\n` +
+                        `💾 Partição: \`${disk.mount}\`\n` +
+                        `📊 Uso: *${disk.percent}%* (${disk.used}/${disk.size})\n` +
+                        `🕐 ${new Date().toLocaleString('pt-BR')}`
+                    ).catch(() => {});
+                }
+            } else { delete lastTelegramAlerts[key]; }
+        }
+    } catch { /* ignore */ }
+}
+
+// ============================================================
 // COMBINED FULL SYSTEM ENDPOINT
 // ============================================================
 async function getFullSystemData() {
@@ -705,6 +839,79 @@ const apiRoutes = {
     'GET /api/system/full': async (req, res) => {
         const data = await getFullSystemData();
         send200(res, data);
+    },
+
+    // ---- TELEGRAM ----
+
+    'GET /api/telegram/config': (req, res) => {
+        send200(res, {
+            enabled: config.TELEGRAM_ENABLED === 'true',
+            bot_token: config.TELEGRAM_BOT_TOKEN ? '***' + config.TELEGRAM_BOT_TOKEN.slice(-6) : '',
+            chat_id: config.TELEGRAM_CHAT_ID || '',
+            has_token: !!config.TELEGRAM_BOT_TOKEN,
+            has_chat_id: !!config.TELEGRAM_CHAT_ID,
+            alert_cpu: parseInt(config.TELEGRAM_ALERT_CPU || '90'),
+            alert_mem: parseInt(config.TELEGRAM_ALERT_MEM || '90'),
+            alert_disk: parseInt(config.TELEGRAM_ALERT_DISK || '90'),
+            daily_report: config.TELEGRAM_DAILY_REPORT !== 'false',
+        });
+    },
+
+    'POST /api/telegram/config': async (req, res) => {
+        if (!isAuthenticated(req)) { send401(res, 'Authentication required'); return; }
+        try {
+            const body = await readBody(req);
+            const fields = ['TELEGRAM_ENABLED','TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID',
+                            'TELEGRAM_ALERT_CPU','TELEGRAM_ALERT_MEM','TELEGRAM_ALERT_DISK',
+                            'TELEGRAM_DAILY_REPORT'];
+            for (const field of fields) {
+                if (body[field] !== undefined) {
+                    saveConfigValue(field, String(body[field]));
+                    config[field] = String(body[field]);
+                }
+            }
+            send200(res, { ok: true });
+        } catch (err) {
+            send500(res, err.message);
+        }
+    },
+
+    'POST /api/telegram/test': async (req, res) => {
+        if (!isAuthenticated(req)) { send401(res, 'Authentication required'); return; }
+        try {
+            const body = await readBody(req).catch(() => ({}));
+            const token = body.token || config.TELEGRAM_BOT_TOKEN;
+            const chatId = body.chat_id || config.TELEGRAM_CHAT_ID;
+
+            if (!token || !chatId) {
+                send400(res, 'token e chat_id são obrigatórios');
+                return;
+            }
+
+            // Validate bot first
+            const meRes = await telegramGetMe(token);
+            if (!meRes.ok) {
+                send200(res, { ok: false, error: 'Token inválido ou sem conexão com Telegram' });
+                return;
+            }
+
+            const result = await telegramSend(token, chatId,
+                `✅ *Linux Security Monitor — Teste*\n` +
+                `━━━━━━━━━━━━━━━━━━━━\n` +
+                `🖥️ Servidor: \`${os.hostname()}\`\n` +
+                `🕐 ${new Date().toLocaleString('pt-BR')}\n` +
+                `\n` +
+                `Alertas Telegram configurados com sucesso!`
+            );
+
+            send200(res, {
+                ok: result.ok,
+                bot_name: meRes.result ? meRes.result.username : null,
+                error: result.ok ? null : (result.description || 'Falha ao enviar mensagem — verifique o Chat ID'),
+            });
+        } catch (err) {
+            send200(res, { ok: false, error: err.message });
+        }
     },
 
     // ---- AUTH ----
@@ -983,12 +1190,15 @@ async function pushUpdates() {
             broadcast('new_events', newEvents);
         }
 
-        if (clients.size > 0) {
+        if (clients.size > 0 || config.TELEGRAM_ENABLED === 'true') {
             const [metrics, disks, network] = await Promise.all([
                 getLiveMetrics(),
                 getDiskMetrics(),
                 getNetworkLive().catch(() => null),
             ]);
+
+            // Fire Telegram alerts (non-blocking)
+            checkAndSendAlerts(metrics).catch(() => {});
             const riskRow = queryDbOne('SELECT score FROM risk_scores ORDER BY timestamp DESC LIMIT 1');
 
             // Quick PM2 summary (non-blocking)
