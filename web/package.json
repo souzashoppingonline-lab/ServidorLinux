@@ -2,10 +2,10 @@
     "name": "linux-security-monitor-web",
     "version": "1.0.0",
     "description": "Linux Security Monitor Web Dashboard",
-    "main": "src/server.js",
+    "main": "src/monitor.js",
     "scripts": {
-        "start": "node src/server.js",
-        "dev": "node --watch src/server.js"
+        "start": "node src/monitor.js",
+        "dev": "node --watch src/monitor.js"
     },
     "dependencies": {
         "ws": "^8.16.0",
