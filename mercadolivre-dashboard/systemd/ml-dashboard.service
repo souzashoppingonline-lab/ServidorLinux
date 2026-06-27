@@ -1,0 +1,33 @@
+[Unit]
+Description=ML Dashboard — CFO Mercado Livre
+Documentation=https://github.com/souzashoppingonline-lab/ServidorLinux
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/ml-dashboard
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=10
+
+Environment=NODE_ENV=production
+Environment=PORT=3001
+Environment=ML_APP_ID=886699420287362
+Environment=ML_APP_SECRET=5VB9CU0A50wOGCHhqZ67OnuzegeFEKza
+Environment=ML_REDIRECT_URI=https://multimixvendas.duckdns.org/ml/callback
+Environment=DATA_DIR=/var/lib/ml-dashboard
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ml-dashboard
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ml-dashboard
+
+[Install]
+WantedBy=multi-user.target
