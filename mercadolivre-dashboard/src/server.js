@@ -1336,10 +1336,16 @@ route('GET', '/api/scheduler/status', (req, res, sess) => {
 // Manual trigger for a specific sync type
 route('POST', '/api/scheduler/trigger', async (req, res, sess) => {
   const body = await readBody(req);
-  const type = body.type || 'sync_orders';
+  const type    = body.type    || 'sync_orders';
   const storeId = body.storeId || sess.store_id;
-  Scheduler.enqueue(type, storeId, 1); // priority 1 = immediate
-  ok(res, { ok: true, message: `Job ${type} adicionado à fila` });
+  const force   = !!body.force; // bypass dedup when force=true
+
+  if (force) {
+    // Cancel any existing pending job of same type+store and enqueue fresh
+    db.prepare("DELETE FROM job_queue WHERE type=? AND store_id=? AND status='pending'").run(type, storeId);
+  }
+  const id = Scheduler.enqueue(type, storeId, 1);
+  ok(res, { ok: true, jobId: id, message: `Job ${type} adicionado à fila` });
 });
 
 // Clear completed/failed jobs older than 24h

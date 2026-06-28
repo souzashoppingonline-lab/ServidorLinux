@@ -444,6 +444,9 @@ async function renderListings() {
         <div class="page-title">Anúncios</div>
         <div class="page-subtitle">Gerenciar produtos e estoque</div>
       </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="forceSyncListings()" title="Re-sincronizar anúncios e promoções">🔄 Sincronizar</button>
+      </div>
     </div>
     <div class="filters">
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -454,6 +457,17 @@ async function renderListings() {
   `);
   await loadListings();
 }
+
+window.forceSyncListings = async () => {
+  try {
+    const storeId = State.currentStore;
+    await API.post('/api/scheduler/trigger', { type: 'sync_listings_batch', storeId, force: true });
+    await API.post('/api/scheduler/trigger', { type: 'sync_promotions',     storeId, force: true });
+    toast('Sync de anúncios e promoções iniciado — aguarde alguns minutos e recarregue', 'success');
+  } catch (e) {
+    toast('Erro: ' + e.message, 'error');
+  }
+};
 
 window.setListingStatus = async (status) => {
   listingsState.status = status;
