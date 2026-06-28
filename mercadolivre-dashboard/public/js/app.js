@@ -318,9 +318,15 @@ async function renderDashboard() {
         <div class="card">
           <div class="card-title">⚡ Ações Necessárias</div>
           ${actionItems(kpis)}
-          ${rep ? reputationCard(rep) : ''}
         </div>
       </div>
+
+      ${rep ? `
+      <div class="card" style="margin-top:0">
+        <div class="card-title">⭐ Reputação do Vendedor</div>
+        ${reputationCard(rep)}
+      </div>
+      ` : ''}
 
       <div class="card">
         <div class="card-title">🛒 Últimos Pedidos</div>
@@ -439,46 +445,45 @@ function actionItems(kpis) {
 
 function reputationCard(rep) {
   const LEVEL_LABEL = {
-    '1_red':    { label: 'Vermelho',    color: '#ef4444', icon: '🔴' },
-    '2_orange': { label: 'Laranja',     color: '#f97316', icon: '🟠' },
-    '3_yellow': { label: 'Amarelo',     color: '#eab308', icon: '🟡' },
-    '4_light_green': { label: 'Verde Claro', color: '#84cc16', icon: '🟢' },
-    '5_green':  { label: 'Verde',       color: '#22c55e', icon: '🟢' },
+    '1_red':         { label: 'Vermelho',    color: '#ef4444', bg: '#fef2f2', icon: '🔴' },
+    '2_orange':      { label: 'Laranja',     color: '#f97316', bg: '#fff7ed', icon: '🟠' },
+    '3_yellow':      { label: 'Amarelo',     color: '#eab308', bg: '#fefce8', icon: '🟡' },
+    '4_light_green': { label: 'Verde Claro', color: '#84cc16', bg: '#f7fee7', icon: '🟢' },
+    '5_green':       { label: 'Verde',       color: '#22c55e', bg: '#f0fdf4', icon: '🟢' },
   };
-  const lvl = LEVEL_LABEL[rep.level_id] || { label: rep.level_id || 'N/A', color: '#9ca3af', icon: '⚪' };
+  const lvl = LEVEL_LABEL[rep.level_id] || { label: rep.level_id || 'N/A', color: '#9ca3af', bg: '#f9fafb', icon: '⚪' };
   const total = rep.transactions_total || 1;
-  const posPct = ((rep.ratings_positive / total) * 100).toFixed(1);
-  const delayPct = ((rep.metrics_sales_delayed_pct || 0) * 100).toFixed(1);
+  const posPct    = ((rep.ratings_positive / total) * 100).toFixed(1);
+  const delayPct  = ((rep.metrics_sales_delayed_pct || 0) * 100).toFixed(1);
   const claimsPct = ((rep.metrics_claims_rate || 0) * 100).toFixed(1);
   const cancelPct = ((rep.metrics_cancellations_rate || 0) * 100).toFixed(1);
 
+  const metricBox = (icon, label, value, bad) => `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 16px;background:var(--surface);border-radius:10px;gap:6px;text-align:center">
+      <span style="font-size:24px">${icon}</span>
+      <span style="font-size:22px;font-weight:700;color:${bad ? '#ef4444' : '#22c55e'}">${value}</span>
+      <span style="font-size:12px;color:var(--text-2)">${label}</span>
+    </div>
+  `;
+
   return `
-    <div style="margin-top:16px;padding:16px;background:var(--bg);border-radius:var(--radius-sm);border:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-        <span style="font-size:22px">${lvl.icon}</span>
-        <div>
-          <div style="font-weight:700;font-size:15px;color:${lvl.color}">Reputação ${lvl.label}</div>
-          <div style="font-size:12px;color:var(--text-2)">${fmt.num(rep.transactions_completed)} vendas concluídas</div>
+    <div style="display:flex;align-items:center;gap:20px;padding:20px;background:${lvl.bg};border-radius:10px;margin-bottom:20px;border:1.5px solid ${lvl.color}33">
+      <span style="font-size:48px;line-height:1">${lvl.icon}</span>
+      <div>
+        <div style="font-size:22px;font-weight:800;color:${lvl.color}">Reputação ${lvl.label}</div>
+        <div style="font-size:14px;color:var(--text-2);margin-top:4px">
+          ${fmt.num(rep.transactions_completed)} vendas concluídas &nbsp;·&nbsp;
+          ${fmt.num(rep.transactions_canceled)} canceladas &nbsp;·&nbsp;
+          ${fmt.num(rep.transactions_total)} total
         </div>
+        ${rep.power_seller_status ? `<div style="margin-top:6px"><span style="background:${lvl.color};color:#fff;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:.5px">🏅 ${rep.power_seller_status.toUpperCase()}</span></div>` : ''}
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px">
-        <div style="display:flex;justify-content:space-between;padding:8px 10px;background:var(--surface);border-radius:6px">
-          <span style="color:var(--text-2)">👍 Positivas</span>
-          <span style="font-weight:600;color:#22c55e">${posPct}%</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;padding:8px 10px;background:var(--surface);border-radius:6px">
-          <span style="color:var(--text-2)">⏱ Atrasos</span>
-          <span style="font-weight:600;color:${parseFloat(delayPct) > 5 ? '#ef4444' : '#22c55e'}">${delayPct}%</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;padding:8px 10px;background:var(--surface);border-radius:6px">
-          <span style="color:var(--text-2)">⚠ Reclamações</span>
-          <span style="font-weight:600;color:${parseFloat(claimsPct) > 2 ? '#ef4444' : '#22c55e'}">${claimsPct}%</span>
-        </div>
-        <div style="display:flex;justify-content:space-between;padding:8px 10px;background:var(--surface);border-radius:6px">
-          <span style="color:var(--text-2)">❌ Cancelamentos</span>
-          <span style="font-weight:600;color:${parseFloat(cancelPct) > 3 ? '#ef4444' : '#22c55e'}">${cancelPct}%</span>
-        </div>
-      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+      ${metricBox('👍', 'Avaliações Positivas', posPct + '%', parseFloat(posPct) < 90)}
+      ${metricBox('⏱', 'Entregas no Prazo', (100 - parseFloat(delayPct)).toFixed(1) + '%', parseFloat(delayPct) > 5)}
+      ${metricBox('⚠️', 'Taxa de Reclamações', claimsPct + '%', parseFloat(claimsPct) > 2)}
+      ${metricBox('❌', 'Taxa de Cancelamentos', cancelPct + '%', parseFloat(cancelPct) > 3)}
     </div>
   `;
 }
