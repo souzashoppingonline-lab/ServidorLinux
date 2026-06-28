@@ -26,8 +26,8 @@ const SCHEDULER_CONFIG = {
   batchDelay: 600000,       // 10 minutes between listing batches (ms)
   minDelay: 1000,           // minimum delay between API calls (ms)
   maxCallsPerMinute: 15,    // max API calls per minute (ML free tier ~20/min, leave headroom)
-  ordersInterval: 900000,   // 15 minutes
-  questionsInterval: 1200000, // 20 minutes
+  ordersInterval: 1800000,  // 30 minutes
+  questionsInterval: 2400000, // 40 minutes
   stockInterval: 7200000,   // 2 hours
   visitsHour: 3,            // 3am for visits sync
   visitsDelayMs: 3000,      // 3s between each day fetch for visits
@@ -636,11 +636,18 @@ const Scheduler = {
   currentJob: null,
 
   enqueue(type, storeId, priority = 5, payload = {}, delayMs = 0) {
+    // Deduplicate: skip if a pending/running job of same type+store already exists
+    const existing = db.prepare(
+      "SELECT id FROM job_queue WHERE type=? AND store_id=? AND status IN ('pending','running') LIMIT 1"
+    ).get(type, storeId);
+    if (existing) return existing.id;
+
     const scheduledAt = Math.floor((Date.now() + delayMs) / 1000);
-    db.prepare(`
+    const result = db.prepare(`
       INSERT INTO job_queue(type, store_id, priority, payload, scheduled_at)
       VALUES(?, ?, ?, ?, ?)
     `).run(type, storeId, priority, JSON.stringify(payload), scheduledAt);
+    return result.lastInsertRowid;
   },
 
   enqueueForAllStores(type, priority, payload = {}, delayMs = 0) {
@@ -707,23 +714,43 @@ const Scheduler = {
   },
 
   start() {
-    // Process queue every 5 seconds
-    setInterval(() => this.tick().catch(e => console.error('[scheduler] tick error:', e.message)), 5000);
+    // On startup: mark any 'running' jobs as failed (they were interrupted by restart)
+    const stuck = db.prepare("UPDATE job_queue SET status='pending', error='Interrompido por restart' WHERE status='running'").run();
+    if (stuck.changes > 0) console.log(`[scheduler] ${stuck.changes} job(s) marcado(s) como pending após restart`);
+
+    // Clean up duplicate pending jobs left from previous restarts
+    db.prepare(`
+      DELETE FROM job_queue WHERE status='pending' AND id NOT IN (
+        SELECT MIN(id) FROM job_queue WHERE status='pending' GROUP BY type, store_id
+      )
+    `).run();
+
+    // Process queue every 10 seconds
+    setInterval(() => this.tick().catch(e => console.error('[scheduler] tick error:', e.message)), 10000);
     // Schedule recurring jobs
     this.scheduleRecurring();
-    // Initial schedule
-    setTimeout(() => this.scheduleAllSyncs(), 3000);
+    // Initial schedule — wait 5s for DB to settle
+    setTimeout(() => this.scheduleAllSyncs(), 5000);
     console.log('[scheduler] Iniciado');
   },
 
   scheduleAllSyncs() {
     const stores = db.prepare('SELECT id FROM stores').all();
     if (!stores.length) return;
+    const now = Date.now() / 1000;
     stores.forEach((s, i) => {
       const base = i * 120000;
-      // Always sync orders and questions on boot
-      this.enqueue('sync_orders',    s.id, 1, {}, base);
-      this.enqueue('sync_questions', s.id, 2, {}, base + 120000);
+
+      // Orders: only enqueue if last sync was > ordersInterval ago (respect rate limits across restarts)
+      const lastO = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='orders'").get(s.id);
+      const ordersDue = !lastO || (now - lastO.last_sync) > SCHEDULER_CONFIG.ordersInterval / 1000;
+      if (ordersDue) this.enqueue('sync_orders', s.id, 1, {}, base);
+      else console.log(`[scheduler] orders store=${s.id} recente (${Math.round((now - lastO.last_sync)/60)}min atrás) — pulando`);
+
+      // Questions: only if stale
+      const lastQ = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='questions'").get(s.id);
+      const questionsDue = !lastQ || (now - lastQ.last_sync) > SCHEDULER_CONFIG.questionsInterval / 1000;
+      if (questionsDue) this.enqueue('sync_questions', s.id, 2, {}, base + 120000);
 
       // Sync listings if never done or stale (> 2h)
       const lastL = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='listings'").get(s.id);
