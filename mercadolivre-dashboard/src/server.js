@@ -22,8 +22,8 @@ const ML_TOKEN_URL = 'https://api.mercadolibre.com/oauth/token';
 const ML_API       = 'https://api.mercadolibre.com';
 
 const SCHEDULER_CONFIG = {
-  batchSize: 5,             // items per batch
-  batchDelay: 600000,       // 10 minutes between listing batches (ms)
+  batchSize: 50,            // IDs per batch (ML /items?ids= allows up to 20 at a time, we page 50 IDs)
+  batchDelay: 60000,        // 1 minute between listing batch pages
   minDelay: 1000,           // minimum delay between API calls (ms)
   maxCallsPerMinute: 15,    // max API calls per minute (ML free tier ~20/min, leave headroom)
   ordersInterval: 1800000,  // 30 minutes
