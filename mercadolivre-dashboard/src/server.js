@@ -483,29 +483,45 @@ const JOB_HANDLERS = {
     const now = new Date();
     const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id,store_id,date,visits) VALUES(?,?,?,?)');
 
-    // Use a single range request instead of 31 individual day requests
-    // ML API supports date_from/date_to ranges returning aggregated data
-    const dateTo   = new Date(now - 86400000).toISOString().split('T')[0];   // yesterday
-    const dateFrom = new Date(now - 31 * 86400000).toISOString().split('T')[0]; // 31 days ago
+    // Sync in weekly buckets (4 calls for 28 days) instead of 31 individual day calls.
+    // ML API returns total_visits for the range; we store with the END date of each bucket
+    // so queries like "WHERE date >= X" work correctly by filtering buckets.
+    const BUCKETS = [
+      { days: 1,  label: 'yesterday' },
+      { days: 7,  label: 'week1' },
+      { days: 14, label: 'week2' },
+      { days: 21, label: 'week3' },
+      { days: 28, label: 'week4' },
+    ];
 
-    const data = await mlFetch(
-      `/users/${storeId}/items/visits?date_from=${dateFrom}&date_to=${dateTo}`,
-      {}, storeId
-    ).catch(e => { console.error('[sync] visits error:', e.message); return null; });
+    let totalItems = 0;
+    for (let b = 0; b < BUCKETS.length - 1; b++) {
+      const endMs  = now - BUCKETS[b].days * 86400000;
+      const startMs = now - BUCKETS[b + 1].days * 86400000;
+      const dateFrom = new Date(startMs).toISOString().split('T')[0];
+      const dateTo   = new Date(endMs).toISOString().split('T')[0];
 
-    if (data?.items_visits?.length) {
-      db.transaction((items) => {
-        for (const item of items) {
-          if (item.id && item.total_visits > 0) {
-            // Store as the total for the period (no daily granularity from range query)
-            insert.run(item.id, storeId, dateTo, item.total_visits);
+      if (b > 0) await new Promise(r => setTimeout(r, 2000)); // 2s between calls
+
+      const data = await mlFetch(
+        `/users/${storeId}/items/visits?date_from=${dateFrom}&date_to=${dateTo}`,
+        {}, storeId
+      ).catch(e => { console.error(`[sync] visits bucket ${b} error:`, e.message); return null; });
+
+      if (data?.items_visits?.length) {
+        db.transaction((items) => {
+          for (const item of items) {
+            if (item.id && item.total_visits > 0) {
+              insert.run(item.id, storeId, dateTo, item.total_visits);
+            }
           }
-        }
-      })(data.items_visits);
+        })(data.items_visits);
+        totalItems += data.items_visits.length;
+      }
     }
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
-    console.log(`[sync] visits done store=${storeId} items=${data?.items_visits?.length || 0}`);
+    console.log(`[sync] visits done store=${storeId} totalEntries=${totalItems}`);
   },
 };
 
@@ -601,38 +617,53 @@ const Scheduler = {
     const stores = db.prepare('SELECT id FROM stores').all();
     if (!stores.length) return;
     stores.forEach((s, i) => {
-      // Stagger: orders first, then questions 2min later, then listings 5min later
       const base = i * 120000;
-      this.enqueue('sync_orders',        s.id, 1, {},           base);
-      this.enqueue('sync_questions',     s.id, 2, {},           base + 120000);
-      this.enqueue('sync_listings_batch',s.id, 4, { offset: 0 }, base + 300000);
+      // Always sync orders and questions on boot
+      this.enqueue('sync_orders',    s.id, 1, {}, base);
+      this.enqueue('sync_questions', s.id, 2, {}, base + 120000);
+
+      // Sync listings if never done or stale (> 2h)
+      const lastL = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='listings'").get(s.id);
+      const listingsStale = !lastL || (Date.now()/1000 - lastL.last_sync) > 7200;
+      if (listingsStale) this.enqueue('sync_listings_batch', s.id, 4, { offset: 0 }, base + 300000);
+
+      // Sync visits if never done (first run) or stale (> 20h)
+      const lastV = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='visits'").get(s.id);
+      const visitsNeverDone = !lastV;
+      const visitsStale = lastV && (Date.now()/1000 - lastV.last_sync) > 72000;
+      if (visitsNeverDone) {
+        console.log(`[scheduler] Visitas nunca sincronizadas para store=${s.id} — agendando agora`);
+        this.enqueue('sync_visits', s.id, 3, {}, base + 600000); // after orders+questions
+      } else if (visitsStale) {
+        this.enqueue('sync_visits', s.id, 3, {}, base + 600000);
+      }
     });
   },
 
   scheduleRecurring() {
-    // Orders: every 10 minutes
+    // Orders: every 15 minutes
     setInterval(() => this.enqueueForAllStores('sync_orders', 1), SCHEDULER_CONFIG.ordersInterval);
 
-    // Questions: every 15 minutes
+    // Questions: every 20 minutes
     setInterval(() => this.enqueueForAllStores('sync_questions', 2), SCHEDULER_CONFIG.questionsInterval);
 
-    // Stock/Listings: every 2 hours (start fresh batch cycle)
+    // Listings: every 2 hours
     setInterval(() => this.enqueueForAllStores('sync_listings_batch', 4, { offset: 0 }), SCHEDULER_CONFIG.stockInterval);
 
-    // Visits: once a day at 2am
-    const scheduleVisitsAt2am = () => {
+    // Visits: once a day at 3am (and on boot if stale — handled in scheduleAllSyncs)
+    const scheduleVisitsDaily = () => {
       const now = new Date();
-      const next2am = new Date(now);
-      next2am.setHours(2, 0, 0, 0);
-      if (next2am <= now) next2am.setDate(next2am.getDate() + 1);
-      const delay = next2am - now;
-      console.log(`[scheduler] Visitas agendadas para ${next2am.toISOString()} (${Math.round(delay/3600000)}h)`);
+      const next = new Date(now);
+      next.setHours(SCHEDULER_CONFIG.visitsHour, 0, 0, 0);
+      if (next <= now) next.setDate(next.getDate() + 1);
+      const delay = next - now;
+      console.log(`[scheduler] Próxima sync de visitas: ${next.toISOString()} (${Math.round(delay/3600000)}h)`);
       setTimeout(() => {
-        this.enqueueForAllStores('sync_visits', 6);
-        scheduleVisitsAt2am(); // reschedule for next day
+        this.enqueueForAllStores('sync_visits', 3);
+        scheduleVisitsDaily();
       }, delay);
     };
-    scheduleVisitsAt2am();
+    scheduleVisitsDaily();
   },
 };
 
