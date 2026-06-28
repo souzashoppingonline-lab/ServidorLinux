@@ -2588,10 +2588,7 @@ window.openCustomer = async function(buyerId, nickname) {
       confirmed: '#3b82f6', in_process: '#3b82f6',
     };
 
-    const fmtOrderId = id => {
-      const s = String(id);
-      return s.length > 10 ? s.slice(-10) : s;
-    };
+    const fmtOrderId = id => String(id);
     const fmtFull = d => d ? new Date(d).toLocaleString('pt-BR', {
       day: '2-digit', month: '2-digit', year: 'numeric',
       hour: '2-digit', minute: '2-digit'

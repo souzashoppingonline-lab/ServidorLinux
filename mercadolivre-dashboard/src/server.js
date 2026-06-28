@@ -1864,7 +1864,7 @@ route('GET', '/api/customers/detail', (req, res, sess) => {
   if (!customer) { apiErr(res, 404, 'Cliente não encontrado'); return; }
 
   const orders = db.prepare(`
-    SELECT o.id, o.date_created, o.date_closed, o.total_amount, o.status, o.shipping_status,
+    SELECT CAST(o.id AS TEXT) as id, o.date_created, o.date_closed, o.total_amount, o.status, o.shipping_status,
            o.receiver_city, o.receiver_state, o.receiver_state_code,
            GROUP_CONCAT(oi.item_title, ' | ') as items,
            COUNT(oi.id) as item_count,
