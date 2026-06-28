@@ -1773,14 +1773,16 @@ route('POST', '/api/promotions/sync', (req, res, sess) => {
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
 });
 
-route('GET', '/api/promotions/debug', (req, res, sess) => {
-  const storeId = qp(req).get('storeId') || sess.store_id;
-  const promos     = db.prepare('SELECT * FROM promotions WHERE store_id=? LIMIT 10').all(storeId);
-  const promoItems = db.prepare('SELECT * FROM promotion_items WHERE store_id=? LIMIT 20').all(storeId);
-  const listings   = db.prepare('SELECT id, title, original_price, deal_ids FROM listings WHERE store_id=? AND original_price > 0 LIMIT 20').all(storeId);
+route('GET', '/api/promotions/debug', (req, res) => {
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
+  const promos          = db.prepare('SELECT * FROM promotions WHERE store_id=? LIMIT 10').all(storeId);
+  const promoItems      = db.prepare('SELECT * FROM promotion_items WHERE store_id=? LIMIT 20').all(storeId);
+  const listings        = db.prepare('SELECT id, title, original_price, deal_ids FROM listings WHERE store_id=? AND original_price > 0 LIMIT 20').all(storeId);
   const totalPromoItems = db.prepare('SELECT COUNT(*) as n FROM promotion_items WHERE store_id=?').get(storeId);
-  ok(res, { promos, promoItems, listingsWithOriginalPrice: listings, totalPromoItems });
-});
+  const totalPromos     = db.prepare('SELECT COUNT(*) as n FROM promotions WHERE store_id=?').get(storeId);
+  ok(res, { totalPromos, totalPromoItems, promos, promoItems, listingsWithOriginalPrice: listings });
+}, true);
 
 // ── Reputation ─────────────────────────────────────────────
 route('GET', '/api/reputation', (req, res, sess) => {
