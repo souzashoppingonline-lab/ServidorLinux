@@ -142,22 +142,23 @@ async function refreshToken(storeId, rToken) {
 
 async function exchangeCode(code) {
   const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    client_id: ML_APP_ID,
+    grant_type:    'authorization_code',
+    client_id:     ML_APP_ID,
     client_secret: ML_APP_SECRET,
     code,
-    redirect_uri: ML_REDIRECT_URI,
+    redirect_uri:  ML_REDIRECT_URI,
   });
+  console.log('[oauth] Trocando code. redirect_uri:', ML_REDIRECT_URI);
+  console.log('[oauth] Payload:', body.toString().replace(ML_APP_SECRET, '***'));
   const res = await fetch(ML_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
   });
-  if (!res.ok) {
-    const t = await res.text().catch(() => '');
-    throw new Error(`Troca de código falhou: ${t}`);
-  }
-  return res.json();
+  const text = await res.text();
+  console.log('[oauth] ML response', res.status, ':', text.slice(0, 500));
+  if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text}`);
+  return JSON.parse(text);
 }
 
 // ============================================================
