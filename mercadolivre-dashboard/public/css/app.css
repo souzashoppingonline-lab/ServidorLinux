@@ -1262,3 +1262,42 @@ tr:hover td { background: #fafafa; }
 @media (max-width: 480px) {
   .performance-summary { grid-template-columns: 1fr; }
 }
+
+/* ============================================================
+   SCHEDULER
+   ============================================================ */
+.scheduler-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) {
+  .scheduler-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .scheduler-grid { grid-template-columns: 1fr; }
+}
+
+.rate-limiter-card {
+  background: var(--card-bg);
+}
+
+.job-status-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.job-status-badge.pending   { background: #fef3c7; color: #92400e; }
+.job-status-badge.running   { background: #dbeafe; color: #1e40af; }
+.job-status-badge.completed { background: #d1fae5; color: #065f46; }
+.job-status-badge.failed    { background: #fee2e2; color: #991b1b; }
+
+.trigger-buttons {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}

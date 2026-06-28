@@ -72,6 +72,10 @@ function loading() {
 function destroyCharts() {
   Object.values(State.charts).forEach(c => { try { c.destroy(); } catch {} });
   State.charts = {};
+  if (State.schedulerRefreshTimer) {
+    clearInterval(State.schedulerRefreshTimer);
+    State.schedulerRefreshTimer = null;
+  }
 }
 
 // ============================================================
@@ -104,6 +108,7 @@ const PAGES = {
   weekday:          renderWeekday,
   'products-analysis': renderProducts,
   performance:      renderPerformance,
+  scheduler:        renderScheduler,
 };
 
 const PAGE_TITLES = {
@@ -118,6 +123,7 @@ const PAGE_TITLES = {
   weekday:          'Dias da Semana',
   'products-analysis': 'Ranking de Produtos',
   'performance':    'Performance de Anúncios',
+  scheduler:        'Scheduler',
 };
 
 function navigate(page) {
@@ -196,28 +202,33 @@ async function init() {
 
     // Sync status
     async function loadSyncStatus() {
-      const data = await API.get('/api/sync/status').catch(() => ({ last_sync: 0 }));
+      const data = await API.get('/api/scheduler/status').catch(() => null);
       const el = document.getElementById('syncStatus');
-      if (el && data.last_sync) {
-        const mins = Math.floor((Date.now() / 1000 - data.last_sync) / 60);
-        el.textContent = mins < 1 ? 'sincronizado agora' : `${mins}min atrás`;
+      if (el && data) {
+        const logs = data.syncLogs || [];
+        const lastSync = logs.reduce((max, l) => Math.max(max, l.last_sync || 0), 0);
+        if (lastSync) {
+          const mins = Math.floor((Date.now() / 1000 - lastSync) / 60);
+          el.textContent = mins < 1 ? 'sincronizado agora' : `${mins}min atrás`;
+        }
+        if (data.queue && data.queue.pending > 0) {
+          el.textContent = `${data.queue.pending} job(s) pendente(s)`;
+        }
       }
     }
     loadSyncStatus();
 
-    // Sync button
+    // Sync button — triggers order sync via scheduler
     document.getElementById('btnSync').addEventListener('click', async () => {
       const btn = document.getElementById('btnSync');
-      btn.textContent = '⟳ Sincronizando...';
+      btn.textContent = '⟳ Enfileirando...';
       btn.disabled = true;
-      await API.post('/api/sync').catch(() => {});
+      await API.post('/api/scheduler/trigger', { type: 'sync_orders', storeId: State.currentStore }).catch(() => {});
       setTimeout(() => {
         btn.textContent = '⟳ Sync';
         btn.disabled = false;
         loadSyncStatus();
-        const page = location.hash.replace('#', '') || 'dashboard';
-        navigate(page);
-      }, 3000);
+      }, 2000);
     });
 
     // Toggle sidebar (mobile)
@@ -1849,6 +1860,199 @@ window.toggleAlerts = () => {
   const hidden = body.style.display === 'none';
   body.style.display = hidden ? '' : 'none';
   if (icon) icon.textContent = hidden ? '▼' : '▶';
+};
+
+// ============================================================
+// PAGE: SCHEDULER
+// ============================================================
+async function renderScheduler() {
+  loading();
+
+  async function loadSchedulerData() {
+    try {
+      const data = await API.get('/api/scheduler/status');
+      const { queue, currentJob, rateLimiter, avgDuration, recentJobs, pendingJobs, syncLogs, apiStats, recentApiLogs, config } = data;
+
+      const jobStatusBadge = (s) => {
+        const map = {
+          pending:   { label: 'Pendente',   cls: 'badge-yellow' },
+          running:   { label: 'Executando', cls: 'badge-blue'   },
+          completed: { label: 'Concluído',  cls: 'badge-green'  },
+          failed:    { label: 'Falha',      cls: 'badge-red'    },
+        };
+        const m = map[s] || { label: s, cls: 'badge-gray' };
+        return `<span class="badge ${m.cls}">${m.label}</span>`;
+      };
+
+      const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+      const fmtMs = (ms) => ms != null ? `${ms}ms` : '-';
+
+      const html = `
+        <div class="page-header">
+          <div>
+            <div class="page-title">Job Scheduler</div>
+            <div class="page-subtitle">Monitoramento da fila de sincronização</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-primary btn-sm" onclick="schedulerTrigger('sync_orders')">🛒 Sincronizar Pedidos</button>
+            <button class="btn btn-secondary btn-sm" onclick="schedulerTrigger('sync_listings_batch')">📦 Sincronizar Anúncios</button>
+            <button class="btn btn-secondary btn-sm" onclick="schedulerTrigger('sync_visits')">👁️ Sincronizar Visitas</button>
+            <button class="btn btn-danger btn-sm" onclick="schedulerCleanup()">🗑 Limpar histórico</button>
+          </div>
+        </div>
+
+        <div class="scheduler-grid">
+          ${kpiCard('Pendentes', fmt.num(queue.pending), 'na fila', '⏳', '#f59e0b')}
+          ${kpiCard('Em execução', fmt.num(queue.running), currentJob ? currentJob.type : 'nenhum', '⚙️', '#3b82f6')}
+          ${kpiCard('Concluídos hoje', fmt.num(queue.completedToday), `${queue.retriesToday} retries`, '✅', '#10b981')}
+          ${kpiCard('Erros hoje', fmt.num(queue.failedToday), 'falhas permanentes', '❌', queue.failedToday > 0 ? '#ef4444' : '#10b981')}
+        </div>
+
+        <div class="chart-grid" style="margin-top:16px">
+          <div class="card rate-limiter-card">
+            <div class="card-title">🚦 Rate Limiter</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:8px">
+              <div>
+                <div style="font-size:11px;color:var(--text-2);font-weight:700;text-transform:uppercase;margin-bottom:4px">Delay atual</div>
+                <div style="font-size:22px;font-weight:800;color:${rateLimiter.currentDelay > 500 ? '#ef4444' : '#10b981'}">${rateLimiter.currentDelay}ms</div>
+              </div>
+              <div>
+                <div style="font-size:11px;color:var(--text-2);font-weight:700;text-transform:uppercase;margin-bottom:4px">Chamadas/min</div>
+                <div style="font-size:22px;font-weight:800">${rateLimiter.callsThisMinute} <span style="font-size:14px;color:var(--text-2)">/ ${config.maxCallsPerMinute}</span></div>
+              </div>
+              <div>
+                <div style="font-size:11px;color:var(--text-2);font-weight:700;text-transform:uppercase;margin-bottom:4px">429 consecutivos</div>
+                <div style="font-size:22px;font-weight:800;color:${rateLimiter.consecutive429 > 0 ? '#ef4444' : '#10b981'}">${rateLimiter.consecutive429}</div>
+              </div>
+            </div>
+            ${apiStats ? `
+            <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+              <div><div style="font-size:11px;color:var(--text-2)">Chamadas (1h)</div><div style="font-size:16px;font-weight:700">${apiStats.calls || 0}</div></div>
+              <div><div style="font-size:11px;color:var(--text-2)">Tempo médio</div><div style="font-size:16px;font-weight:700">${Math.round(apiStats.avg_ms || 0)}ms</div></div>
+              <div><div style="font-size:11px;color:var(--text-2)">Rate limits</div><div style="font-size:16px;font-weight:700;color:${(apiStats.rate_limits || 0) > 0 ? '#ef4444' : '#10b981'}">${apiStats.rate_limits || 0}</div></div>
+            </div>` : ''}
+          </div>
+
+          <div class="card">
+            <div class="card-title">📋 Última Sincronização por Entidade</div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Loja</th><th>Entidade</th><th>Status</th><th>Última sync</th></tr></thead>
+                <tbody>
+                  ${syncLogs.length ? syncLogs.map(l => `
+                    <tr>
+                      <td style="font-size:12px;color:var(--text-2)">${l.store_id}</td>
+                      <td style="font-weight:600">${l.entity}</td>
+                      <td>${l.status === 'ok' ? '<span class="badge badge-green">OK</span>' : `<span class="badge badge-red">${l.status}</span>`}</td>
+                      <td class="td-light" style="font-size:12px">${fmtTs(l.last_sync)}</td>
+                    </tr>
+                  `).join('') : '<tr><td colspan="4" class="text-center td-light" style="padding:20px">Nenhum registro ainda</td></tr>'}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        ${pendingJobs.length ? `
+        <div class="card" style="margin-top:16px">
+          <div class="card-title">⏳ Próximos na Fila</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tipo</th><th>Loja</th><th>Prioridade</th><th>Agendado para</th><th>Tentativas</th></tr></thead>
+              <tbody>
+                ${pendingJobs.map(j => `
+                  <tr>
+                    <td style="font-weight:600;font-family:monospace;font-size:13px">${j.type}</td>
+                    <td style="color:var(--text-2)">${j.store_id}</td>
+                    <td><span class="badge badge-blue">${j.priority}</span></td>
+                    <td class="td-light" style="font-size:12px">${fmtTs(j.scheduled_at)}</td>
+                    <td>${j.attempts}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>` : ''}
+
+        <div class="card" style="margin-top:16px">
+          <div class="card-title">📜 Histórico de Execuções (últimas 20)</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Tipo</th><th>Loja</th><th>Status</th><th>Tentativas</th><th>Duração</th><th>Erro</th><th>Concluído em</th></tr></thead>
+              <tbody>
+                ${recentJobs.length ? recentJobs.map(j => `
+                  <tr>
+                    <td style="font-weight:600;font-family:monospace;font-size:12px">${j.type}</td>
+                    <td style="color:var(--text-2);font-size:12px">${j.store_id}</td>
+                    <td>${jobStatusBadge(j.status)}</td>
+                    <td style="text-align:center">${j.attempts}</td>
+                    <td class="td-light">${fmtMs(j.duration_ms)}</td>
+                    <td style="font-size:11px;color:#ef4444;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${j.error || ''}">${j.error || ''}</td>
+                    <td class="td-light" style="font-size:12px">${fmtTs(j.completed_at)}</td>
+                  </tr>
+                `).join('') : '<tr><td colspan="7" class="text-center td-light" style="padding:20px">Nenhum job executado ainda</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        ${recentApiLogs.length ? `
+        <div class="card" style="margin-top:16px">
+          <div class="card-title">🌐 Logs de API (últimas 10 chamadas)</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Endpoint</th><th>Status</th><th>Duração</th><th>RL Restante</th><th>Hora</th></tr></thead>
+              <tbody>
+                ${recentApiLogs.map(l => `
+                  <tr>
+                    <td style="font-family:monospace;font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${l.endpoint}">${l.endpoint}</td>
+                    <td><span class="badge ${l.status_code === 200 ? 'badge-green' : l.status_code === 429 ? 'badge-red' : 'badge-yellow'}">${l.status_code}</span></td>
+                    <td class="td-light">${fmtMs(l.duration_ms)}</td>
+                    <td class="td-light">${l.rate_limit_remaining >= 0 ? l.rate_limit_remaining : '-'}</td>
+                    <td class="td-light" style="font-size:11px">${fmtTs(l.logged_at)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>` : ''}
+      `;
+
+      const wrap = document.getElementById('schedulerContent');
+      if (wrap) {
+        wrap.innerHTML = html;
+      } else {
+        setContent(`<div id="schedulerContent">${html}</div>`);
+      }
+
+    } catch (e) {
+      setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro ao carregar scheduler</h3><p>${e.message}</p></div>`);
+    }
+  }
+
+  setContent('<div id="schedulerContent"><div class="loading-state"><div class="spinner"></div><p>Carregando...</p></div></div>');
+  await loadSchedulerData();
+
+  // Auto-refresh every 10 seconds
+  State.schedulerRefreshTimer = setInterval(loadSchedulerData, 10000);
+}
+
+window.schedulerTrigger = async (type) => {
+  try {
+    await API.post('/api/scheduler/trigger', { type, storeId: State.currentStore });
+    toast(`Job "${type}" adicionado à fila!`, 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
+
+window.schedulerCleanup = async () => {
+  try {
+    const result = await API.del('/api/scheduler/cleanup');
+    toast(`${result.deleted || 0} jobs removidos do histórico.`, 'success');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 };
 
 // ============================================================

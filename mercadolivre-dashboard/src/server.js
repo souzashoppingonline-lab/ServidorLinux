@@ -21,6 +21,17 @@ const ML_AUTH_URL  = 'https://auth.mercadolivre.com.br/authorization';
 const ML_TOKEN_URL = 'https://api.mercadolibre.com/oauth/token';
 const ML_API       = 'https://api.mercadolibre.com';
 
+const SCHEDULER_CONFIG = {
+  batchSize: 5,           // items per batch
+  batchDelay: 300000,     // 5 minutes between batches (ms)
+  minDelay: 500,          // minimum delay between API calls (ms)
+  maxCallsPerMinute: 20,  // max API calls per minute
+  ordersInterval: 600000, // 10 minutes
+  questionsInterval: 900000, // 15 minutes
+  stockInterval: 7200000, // 2 hours
+  visitsHour: 2,          // 2am for visits sync
+};
+
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ============================================================
@@ -135,6 +146,42 @@ db.exec(`
     visits    INTEGER DEFAULT 0,
     PRIMARY KEY (item_id, store_id, date)
   );
+
+  CREATE TABLE IF NOT EXISTS job_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    type         TEXT NOT NULL,
+    store_id     TEXT NOT NULL,
+    priority     INTEGER DEFAULT 5,
+    payload      TEXT DEFAULT '{}',
+    status       TEXT DEFAULT 'pending',
+    attempts     INTEGER DEFAULT 0,
+    max_attempts INTEGER DEFAULT 3,
+    scheduled_at INTEGER DEFAULT (unixepoch()),
+    started_at   INTEGER,
+    completed_at INTEGER,
+    duration_ms  INTEGER,
+    error        TEXT DEFAULT '',
+    created_at   INTEGER DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status, priority, scheduled_at);
+
+  CREATE TABLE IF NOT EXISTS api_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id     TEXT,
+    endpoint     TEXT,
+    method       TEXT DEFAULT 'GET',
+    status_code  INTEGER,
+    duration_ms  INTEGER,
+    error        TEXT DEFAULT '',
+    rate_limit_remaining INTEGER,
+    logged_at    INTEGER DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS scheduler_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+  );
 `);
 
 setInterval(() => {
@@ -157,6 +204,48 @@ function cacheInvalidate(storeId) {
 }
 
 // ============================================================
+// RATE LIMITER
+// ============================================================
+const RateLimiter = {
+  callsThisMinute: 0,
+  lastMinuteReset: Date.now(),
+  currentDelay: SCHEDULER_CONFIG.minDelay,
+  consecutive429: 0,
+
+  async wait() {
+    const now = Date.now();
+    if (now - this.lastMinuteReset >= 60000) {
+      this.callsThisMinute = 0;
+      this.lastMinuteReset = now;
+    }
+    if (this.callsThisMinute >= SCHEDULER_CONFIG.maxCallsPerMinute) {
+      const wait = 60000 - (now - this.lastMinuteReset);
+      console.log(`[ratelimit] Limite/min atingido — aguardando ${Math.ceil(wait/1000)}s`);
+      await new Promise(r => setTimeout(r, wait + 100));
+      this.callsThisMinute = 0;
+      this.lastMinuteReset = Date.now();
+    }
+    if (this.currentDelay > SCHEDULER_CONFIG.minDelay) {
+      await new Promise(r => setTimeout(r, this.currentDelay));
+    }
+    this.callsThisMinute++;
+  },
+
+  on429() {
+    this.consecutive429++;
+    this.currentDelay = Math.min(this.currentDelay * 2, 30000);
+    console.log(`[ratelimit] 429 detectado (#${this.consecutive429}) — delay aumentado para ${this.currentDelay}ms`);
+  },
+
+  onSuccess() {
+    if (this.consecutive429 > 0) {
+      this.consecutive429 = 0;
+      this.currentDelay = Math.max(this.currentDelay * 0.8, SCHEDULER_CONFIG.minDelay);
+    }
+  },
+};
+
+// ============================================================
 // ML API
 // ============================================================
 async function mlFetch(apiPath, opts = {}, storeId = null) {
@@ -167,6 +256,8 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
     token = await ensureFreshToken(store);
   }
   for (let attempt = 0; attempt < 3; attempt++) {
+    await RateLimiter.wait();
+    const t0 = Date.now();
     const res = await fetch(`${ML_API}${apiPath}`, {
       method: opts.method || 'GET',
       headers: {
@@ -177,7 +268,13 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
       },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
+    const duration = Date.now() - t0;
+    const rlRemaining = parseInt(res.headers.get('x-ratelimit-remaining') || '-1', 10);
+    db.prepare('INSERT INTO api_log(store_id,endpoint,method,status_code,duration_ms,rate_limit_remaining) VALUES(?,?,?,?,?,?)')
+      .run(storeId || '', apiPath.slice(0, 200), opts.method || 'GET', res.status, duration, rlRemaining);
+
     if (res.status === 429) {
+      RateLimiter.on429();
       const wait = parseInt(res.headers.get('x-ratelimit-reset') || res.headers.get('retry-after') || '5', 10);
       console.log(`[api] 429 em ${apiPath} — aguardando ${wait}s...`);
       await new Promise(r => setTimeout(r, Math.min(wait, 30) * 1000));
@@ -185,8 +282,10 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
     }
     if (!res.ok) {
       const text = await res.text().catch(() => '');
+      db.prepare('UPDATE api_log SET error=? WHERE id=(SELECT MAX(id) FROM api_log)').run(text.slice(0, 200));
       throw new Error(`ML API ${res.status}: ${text.slice(0, 200)}`);
     }
+    RateLimiter.onSuccess();
     return res.json();
   }
   throw new Error('ML API 429: rate limit após retries');
@@ -243,202 +342,280 @@ async function exchangeCode(code) {
 }
 
 // ============================================================
-// SYNC FUNCTIONS
+// JOB HANDLERS — helper first
 // ============================================================
-async function syncOrders(storeId) {
-  const log = db.prepare('SELECT last_sync FROM sync_log WHERE store_id=? AND entity=?').get(storeId, 'orders');
-  const lastSync = log?.last_sync || 0;
-  const from = lastSync > 0
-    ? new Date(lastSync * 1000).toISOString().split('T')[0]
-    : new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
 
-  console.log(`[sync] orders store=${storeId} from=${from}`);
-  let offset = 0;
-  let total = 0;
+// Helper to fetch and store item details in batch
+async function processItemBatch(storeId, ids) {
+  if (!ids.length) return;
+  const chunk = ids.join(',');
+  const batch = await mlFetch(
+    `/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`,
+    {}, storeId
+  ).catch(() => null);
+  if (!batch) return;
 
-  while (true) {
-    const page = await mlFetch(
-      `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_asc`,
-      {}, storeId
-    ).catch(e => { console.error('[sync] orders error:', e.message); return null; });
-
-    if (!page || !page.results?.length) break;
-
-    const insertOrder = db.prepare(`
-      INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status)
-      VALUES(?,?,?,?,?,?,?,?,?)
-    `);
-    const insertItem = db.prepare(`
-      INSERT OR IGNORE INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id)
-      VALUES(?,?,?,?,?,?,?)
-    `);
-    const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
-
-    const syncMany = db.transaction((orders) => {
-      for (const o of orders) {
-        insertOrder.run(
-          o.id, storeId, o.status, o.total_amount || 0,
-          o.date_created, o.date_closed, String(o.buyer?.id || ''),
-          o.buyer?.nickname || '', o.shipping?.status || ''
-        );
-        deleteItems.run(o.id);
-        for (const item of (o.order_items || [])) {
-          insertItem.run(o.id, storeId, item.item?.id || '', item.item?.title || '', item.quantity || 1, item.unit_price || 0, item.item?.category_id || '');
-        }
-      }
-    });
-
-    syncMany(page.results);
-    total += page.results.length;
-
-    if (page.results.length < 50) break;
-    offset += 50;
-    if (offset >= 1000) break;
-    await new Promise(r => setTimeout(r, 300));
-  }
-
-  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)')
-    .run(storeId, 'orders', 'ok', '');
-  console.log(`[sync] orders done store=${storeId} total=${total}`);
+  const insert = db.prepare(`INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+  db.transaction((items) => {
+    for (const d of items) {
+      const it = d.body || d;
+      if (!it?.id) continue;
+      insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'active', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
+    }
+  })(batch);
 }
 
-async function syncListings(storeId) {
-  console.log(`[sync] listings store=${storeId}`);
-  let offset = 0;
-  let total = 0;
+const JOB_HANDLERS = {
+  // Incremental order sync — only new orders since last sync
+  async sync_orders(storeId) {
+    const log = db.prepare('SELECT last_sync FROM sync_log WHERE store_id=? AND entity=?').get(storeId, 'orders');
+    const lastSync = log?.last_sync || 0;
+    const from = lastSync > 0
+      ? new Date(lastSync * 1000 - 300000).toISOString() // 5min overlap to catch updates
+      : new Date(Date.now() - 90 * 86400000).toISOString();
+    const fromStr = from.split('T')[0];
 
-  while (true) {
+    console.log(`[sync] orders store=${storeId} from=${fromStr}`);
+    let offset = 0, total = 0;
+
+    while (true) {
+      const page = await mlFetch(
+        `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${fromStr}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_asc`,
+        {}, storeId
+      );
+      if (!page?.results?.length) break;
+
+      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status) VALUES(?,?,?,?,?,?,?,?,?)`);
+      const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
+      const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id) VALUES(?,?,?,?,?,?,?)`);
+
+      db.transaction((orders) => {
+        for (const o of orders) {
+          insertOrder.run(o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed, String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'');
+          deleteItems.run(o.id);
+          for (const item of (o.order_items||[])) {
+            insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'');
+          }
+        }
+      })(page.results);
+
+      total += page.results.length;
+      if (page.results.length < 50) break;
+      offset += 50;
+      if (offset >= 1000) break;
+    }
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'orders', 'ok', '');
+    console.log(`[sync] orders done store=${storeId} new=${total}`);
+  },
+
+  // Batch listings sync — processes SCHEDULER_CONFIG.batchSize items, then schedules next batch
+  async sync_listings_batch(storeId, payload) {
+    const offset = payload.offset || 0;
+    const batchSize = SCHEDULER_CONFIG.batchSize;
+
+    console.log(`[sync] listings_batch store=${storeId} offset=${offset}`);
+
     const search = await mlFetch(
-      `/users/${storeId}/items/search?status=active&limit=50&offset=${offset}`,
+      `/users/${storeId}/items/search?status=${payload.paused ? 'paused' : 'active'}&limit=${batchSize}&offset=${offset}`,
       {}, storeId
-    ).catch(e => { console.error('[sync] listings search error:', e.message); return null; });
+    );
 
-    if (!search || !search.results?.length) break;
+    if (!search?.results?.length) {
+      // Also sync paused items if we just finished active
+      if (!payload.paused) {
+        const paused = await mlFetch(`/users/${storeId}/items/search?status=paused&limit=${batchSize}&offset=0`, {}, storeId).catch(() => null);
+        if (paused?.results?.length) {
+          await processItemBatch(storeId, paused.results);
+          if (paused.paging?.total > batchSize) {
+            Scheduler.enqueue('sync_listings_batch', storeId, 4, { offset: batchSize, paused: true }, SCHEDULER_CONFIG.batchDelay);
+          }
+        }
+      }
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'listings', 'ok', '');
+      console.log(`[sync] listings done store=${storeId}`);
+      return;
+    }
 
-    const allIds = search.results;
-    for (let i = 0; i < allIds.length; i += 20) {
-      if (i > 0) await new Promise(r => setTimeout(r, 300));
-      const chunk = allIds.slice(i, i + 20).join(',');
-      const batch = await mlFetch(
-        `/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`,
+    await processItemBatch(storeId, search.results);
+
+    // Schedule next batch with delay
+    const total = search.paging?.total || 0;
+    if (offset + batchSize < total) {
+      Scheduler.enqueue('sync_listings_batch', storeId, 4, { offset: offset + batchSize, paused: payload.paused }, SCHEDULER_CONFIG.batchDelay);
+    } else if (!payload.paused) {
+      // Start paused items batch
+      Scheduler.enqueue('sync_listings_batch', storeId, 4, { offset: 0, paused: true }, SCHEDULER_CONFIG.batchDelay);
+    } else {
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'listings', 'ok', '');
+    }
+  },
+
+  async sync_questions(storeId) {
+    console.log(`[sync] questions store=${storeId}`);
+    const page = await mlFetch(
+      `/questions/search?seller_id=${storeId}&status=UNANSWERED&limit=50&offset=0&sort_fields=date_created&sort_types=DESC`,
+      {}, storeId
+    );
+    if (!page) return;
+
+    const insert = db.prepare(`INSERT OR REPLACE INTO questions_sync(id,store_id,item_id,item_title,buyer_nickname,text,status,date_created,answer_text,answer_date) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+    db.transaction((qs) => {
+      for (const q of (qs||[])) {
+        insert.run(String(q.id), storeId, q.item_id||'', '', q.from?.nickname||'', q.text||'', q.status||'UNANSWERED', q.date_created||'', q.answer?.text||'', q.answer?.date_created||'');
+      }
+    })(page.questions || []);
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'questions', 'ok', '');
+  },
+
+  async sync_visits(storeId) {
+    console.log(`[sync] visits store=${storeId}`);
+    const now = new Date();
+    const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id,store_id,date,visits) VALUES(?,?,?,?)');
+
+    // Sync each of the last 31 days
+    for (let d = 1; d <= 31; d++) {
+      const date = new Date(now - d * 86400000);
+      const dateStr = date.toISOString().split('T')[0];
+
+      const data = await mlFetch(
+        `/users/${storeId}/items/visits?date_from=${dateStr}&date_to=${dateStr}`,
         {}, storeId
       ).catch(() => null);
 
-      if (!batch) continue;
-      const insert = db.prepare(`
-        INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-      `);
-      db.transaction((items) => {
-        for (const d of items) {
-          const it = d.body || d;
-          if (!it?.id) continue;
-          insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
-        }
-      })(batch);
-      total += batch.length;
-    }
-
-    if (search.results.length < 50) break;
-    offset += 50;
-    if (offset >= 2000) break;
-    await new Promise(r => setTimeout(r, 300));
-  }
-
-  // Also sync paused items
-  const pausedSearch = await mlFetch(`/users/${storeId}/items/search?status=paused&limit=50&offset=0`, {}, storeId).catch(() => null);
-  if (pausedSearch?.results?.length) {
-    for (let i = 0; i < pausedSearch.results.length; i += 20) {
-      const chunk = pausedSearch.results.slice(i, i + 20).join(',');
-      const batch = await mlFetch(`/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`, {}, storeId).catch(() => null);
-      if (!batch) continue;
-      const insert = db.prepare(`INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
-      db.transaction((items) => {
-        for (const d of items) {
-          const it = d.body || d;
-          if (!it?.id) continue;
-          insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
-        }
-      })(batch);
-    }
-  }
-
-  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'listings', 'ok', '');
-  console.log(`[sync] listings done store=${storeId} total=${total}`);
-}
-
-async function syncQuestions(storeId) {
-  console.log(`[sync] questions store=${storeId}`);
-  const page = await mlFetch(
-    `/questions/search?seller_id=${storeId}&status=UNANSWERED&limit=50&offset=0&sort_fields=date_created&sort_types=DESC`,
-    {}, storeId
-  ).catch(() => null);
-
-  if (!page) return;
-
-  const insert = db.prepare(`
-    INSERT OR REPLACE INTO questions_sync(id,store_id,item_id,item_title,buyer_nickname,text,status,date_created,answer_text,answer_date)
-    VALUES(?,?,?,?,?,?,?,?,?,?)
-  `);
-
-  db.transaction((qs) => {
-    for (const q of qs) {
-      insert.run(String(q.id), storeId, q.item_id||'', '', q.from?.nickname||'', q.text||'', q.status||'UNANSWERED', q.date_created||'', q.answer?.text||'', q.answer?.date_created||'');
-    }
-  })(page.questions || []);
-
-  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'questions', 'ok', '');
-  console.log(`[sync] questions done store=${storeId}`);
-}
-
-async function syncVisits(storeId) {
-  console.log(`[sync] visits store=${storeId}`);
-  const now = new Date();
-
-  // Sync last 31 days one day at a time to store daily granularity
-  for (let d = 0; d < 31; d++) {
-    const date = new Date(now - d * 86400000);
-    const dateStr = date.toISOString().split('T')[0];
-
-    const data = await mlFetch(
-      `/users/${storeId}/items/visits?date_from=${dateStr}&date_to=${dateStr}`,
-      {}, storeId
-    ).catch(() => null);
-
-    if (!data || !data.items_visits) continue;
-
-    const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id, store_id, date, visits) VALUES(?,?,?,?)');
-    db.transaction((items) => {
-      for (const item of items) {
-        if (item.id && item.total_visits > 0) {
-          insert.run(item.id, storeId, dateStr, item.total_visits);
-        }
+      if (data?.items_visits?.length) {
+        db.transaction((items) => {
+          for (const item of items) {
+            if (item.id && item.total_visits > 0) insert.run(item.id, storeId, dateStr, item.total_visits);
+          }
+        })(data.items_visits);
       }
-    })(data.items_visits);
-
-    await new Promise(r => setTimeout(r, 200));
-  }
-
-  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
-  console.log(`[sync] visits done store=${storeId}`);
-}
-
-async function syncAllStores() {
-  const stores = db.prepare('SELECT * FROM stores').all();
-  for (const store of stores) {
-    try {
-      await syncOrders(store.id);
-      await new Promise(r => setTimeout(r, 1000));
-      await syncListings(store.id);
-      await new Promise(r => setTimeout(r, 1000));
-      await syncVisits(store.id);
-      await new Promise(r => setTimeout(r, 1000));
-      await syncQuestions(store.id);
-    } catch(e) {
-      console.error(`[sync] error store=${store.id}:`, e.message);
     }
-  }
-}
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
+    console.log(`[sync] visits done store=${storeId}`);
+  },
+};
+
+// ============================================================
+// JOB SCHEDULER
+// ============================================================
+const Scheduler = {
+  running: false,
+  currentJob: null,
+
+  enqueue(type, storeId, priority = 5, payload = {}, delayMs = 0) {
+    const scheduledAt = Math.floor((Date.now() + delayMs) / 1000);
+    db.prepare(`
+      INSERT INTO job_queue(type, store_id, priority, payload, scheduled_at)
+      VALUES(?, ?, ?, ?, ?)
+    `).run(type, storeId, priority, JSON.stringify(payload), scheduledAt);
+  },
+
+  enqueueForAllStores(type, priority, payload = {}, delayMs = 0) {
+    const stores = db.prepare('SELECT id FROM stores').all();
+    stores.forEach(s => this.enqueue(type, s.id, priority, payload, delayMs));
+  },
+
+  getNext() {
+    return db.prepare(`
+      SELECT * FROM job_queue
+      WHERE status = 'pending' AND scheduled_at <= unixepoch()
+      ORDER BY priority ASC, scheduled_at ASC
+      LIMIT 1
+    `).get();
+  },
+
+  async processJob(job) {
+    db.prepare('UPDATE job_queue SET status=?, started_at=unixepoch(), attempts=attempts+1 WHERE id=?')
+      .run('running', job.id);
+    this.currentJob = job;
+    const t0 = Date.now();
+
+    try {
+      const payload = JSON.parse(job.payload || '{}');
+      await JOB_HANDLERS[job.type]?.(job.store_id, payload);
+      db.prepare('UPDATE job_queue SET status=?, completed_at=unixepoch(), duration_ms=? WHERE id=?')
+        .run('completed', Date.now() - t0, job.id);
+      console.log(`[scheduler] ✓ ${job.type} store=${job.store_id} (${Date.now()-t0}ms)`);
+    } catch (e) {
+      const attempts = job.attempts + 1;
+      const retryDelays = [300000, 900000, 1800000]; // 5min, 15min, 30min
+      if (attempts < job.max_attempts) {
+        const delay = retryDelays[attempts - 1] || 1800000;
+        db.prepare('UPDATE job_queue SET status=?, error=?, scheduled_at=unixepoch()+? WHERE id=?')
+          .run('pending', e.message.slice(0, 500), Math.floor(delay/1000), job.id);
+        console.log(`[scheduler] ✗ ${job.type} tentativa ${attempts}/${job.max_attempts} — retry em ${delay/60000}min`);
+      } else {
+        db.prepare('UPDATE job_queue SET status=?, completed_at=unixepoch(), duration_ms=?, error=? WHERE id=?')
+          .run('failed', Date.now() - t0, e.message.slice(0, 500), job.id);
+        console.error(`[scheduler] FALHA PERMANENTE ${job.type} store=${job.store_id}:`, e.message);
+      }
+    }
+    this.currentJob = null;
+  },
+
+  async tick() {
+    if (this.running) return;
+    const job = this.getNext();
+    if (!job) return;
+    this.running = true;
+    try {
+      await this.processJob(job);
+    } finally {
+      this.running = false;
+    }
+  },
+
+  start() {
+    // Process queue every 5 seconds
+    setInterval(() => this.tick().catch(e => console.error('[scheduler] tick error:', e.message)), 5000);
+    // Schedule recurring jobs
+    this.scheduleRecurring();
+    // Initial schedule
+    setTimeout(() => this.scheduleAllSyncs(), 3000);
+    console.log('[scheduler] Iniciado');
+  },
+
+  scheduleAllSyncs() {
+    const stores = db.prepare('SELECT id FROM stores').all();
+    if (!stores.length) return;
+    stores.forEach((s, i) => {
+      // Stagger store syncs by 30 seconds each
+      const delay = i * 30000;
+      this.enqueue('sync_orders', s.id, 1, {}, delay);
+      this.enqueue('sync_questions', s.id, 2, {}, delay + 5000);
+      this.enqueue('sync_listings_batch', s.id, 4, { offset: 0 }, delay + 10000);
+    });
+  },
+
+  scheduleRecurring() {
+    // Orders: every 10 minutes
+    setInterval(() => this.enqueueForAllStores('sync_orders', 1), SCHEDULER_CONFIG.ordersInterval);
+
+    // Questions: every 15 minutes
+    setInterval(() => this.enqueueForAllStores('sync_questions', 2), SCHEDULER_CONFIG.questionsInterval);
+
+    // Stock/Listings: every 2 hours (start fresh batch cycle)
+    setInterval(() => this.enqueueForAllStores('sync_listings_batch', 4, { offset: 0 }), SCHEDULER_CONFIG.stockInterval);
+
+    // Visits: once a day at 2am
+    const scheduleVisitsAt2am = () => {
+      const now = new Date();
+      const next2am = new Date(now);
+      next2am.setHours(2, 0, 0, 0);
+      if (next2am <= now) next2am.setDate(next2am.getDate() + 1);
+      const delay = next2am - now;
+      console.log(`[scheduler] Visitas agendadas para ${next2am.toISOString()} (${Math.round(delay/3600000)}h)`);
+      setTimeout(() => {
+        this.enqueueForAllStores('sync_visits', 6);
+        scheduleVisitsAt2am(); // reschedule for next day
+      }, delay);
+    };
+    scheduleVisitsAt2am();
+  },
+};
 
 // ============================================================
 // SESSIONS
@@ -889,18 +1066,48 @@ route('POST', '/api/questions/answer', async (req, res, sess) => {
   }
 });
 
-// ── Sync ───────────────────────────────────────────────────
-route('POST', '/api/sync', (req, res, sess) => {
-  syncAllStores().catch(e => console.error('[sync] manual trigger error:', e.message));
-  ok(res, { ok: true, message: 'Sincronização iniciada em background' });
+// ── Scheduler Routes ───────────────────────────────────────
+// Scheduler status dashboard data
+route('GET', '/api/scheduler/status', (req, res, sess) => {
+  const pending = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='pending'").get().n;
+  const running = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='running'").get().n;
+  const completedToday = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='completed' AND completed_at >= unixepoch('now','start of day')").get().n;
+  const failedToday = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='failed' AND completed_at >= unixepoch('now','start of day')").get().n;
+  const retriesToday = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE attempts > 1 AND created_at >= unixepoch('now','start of day')").get().n;
+  const avgDuration = db.prepare("SELECT AVG(duration_ms) as avg FROM job_queue WHERE status='completed' AND completed_at >= unixepoch()-3600").get().avg || 0;
+  const recentJobs = db.prepare("SELECT type, store_id, status, attempts, duration_ms, error, created_at, completed_at FROM job_queue ORDER BY id DESC LIMIT 20").all();
+  const syncLogs = db.prepare("SELECT * FROM sync_log").all();
+  const pendingJobs = db.prepare("SELECT type, store_id, priority, scheduled_at, attempts FROM job_queue WHERE status='pending' ORDER BY priority, scheduled_at LIMIT 10").all();
+  const apiStats = db.prepare("SELECT COUNT(*) as calls, AVG(duration_ms) as avg_ms, SUM(CASE WHEN status_code=429 THEN 1 ELSE 0 END) as rate_limits FROM api_log WHERE logged_at >= unixepoch()-3600").get();
+  const recentApiLogs = db.prepare("SELECT endpoint, status_code, duration_ms, rate_limit_remaining, logged_at FROM api_log ORDER BY id DESC LIMIT 10").all();
+
+  ok(res, {
+    queue: { pending, running, completedToday, failedToday, retriesToday },
+    currentJob: Scheduler.currentJob,
+    rateLimiter: { currentDelay: RateLimiter.currentDelay, callsThisMinute: RateLimiter.callsThisMinute, consecutive429: RateLimiter.consecutive429 },
+    avgDuration: Math.round(avgDuration),
+    recentJobs,
+    pendingJobs,
+    syncLogs,
+    apiStats,
+    recentApiLogs,
+    config: SCHEDULER_CONFIG,
+  });
 });
 
-route('GET', '/api/sync/status', (req, res, sess) => {
-  const logs = db.prepare('SELECT * FROM sync_log WHERE store_id=?').all(sess.store_id);
-  const store = db.prepare('SELECT last_sync FROM stores WHERE id=?').get(sess.store_id);
-  // Use the most recent sync across all entities as last_sync
-  const lastSync = logs.reduce((max, l) => Math.max(max, l.last_sync || 0), store?.last_sync || 0);
-  ok(res, { logs, last_sync: lastSync });
+// Manual trigger for a specific sync type
+route('POST', '/api/scheduler/trigger', async (req, res, sess) => {
+  const body = await readBody(req);
+  const type = body.type || 'sync_orders';
+  const storeId = body.storeId || sess.store_id;
+  Scheduler.enqueue(type, storeId, 1); // priority 1 = immediate
+  ok(res, { ok: true, message: `Job ${type} adicionado à fila` });
+});
+
+// Clear completed/failed jobs older than 24h
+route('DELETE', '/api/scheduler/cleanup', (req, res, sess) => {
+  const deleted = db.prepare("DELETE FROM job_queue WHERE status IN ('completed','failed') AND created_at < unixepoch()-86400").run();
+  ok(res, { ok: true, deleted: deleted.changes });
 });
 
 // ── Messages ───────────────────────────────────────────────
@@ -1462,8 +1669,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`║  App ID: ${ML_APP_ID}   ║`);
   console.log(`╚════════════════════════════════════════════╝`);
 
-  setTimeout(syncAllStores, 5000); // initial sync 5s after startup
-  setInterval(syncAllStores, 30 * 60_000); // every 30 min
+  Scheduler.start();
 });
 
 process.on('SIGTERM', () => { db.close(); server.close(() => process.exit(0)); });
