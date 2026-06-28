@@ -1652,7 +1652,7 @@ async function renderPerformance() {
     const data = await API.get(url);
     perfData = data;
 
-    const { items, summary, alerts } = data;
+    const { items, summary, alerts, dateFrom, dateTo, dataGap } = data;
     const periodLabels = { yesterday: 'Ontem', '3d': '3 dias', '7d': '7 dias', '15d': '15 dias', '30d': '30 dias' };
     const periodKeys   = ['yesterday', '3d', '7d', '15d', '30d'];
 
@@ -1746,9 +1746,14 @@ async function renderPerformance() {
       <div class="card">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
           <div class="card-title" style="margin-bottom:0">📋 Todos os Anúncios</div>
-          <div class="search-wrap" style="max-width:320px">
+          ${dataGap ? `<span style="font-size:11px;background:#fef3c7;color:#92400e;padding:3px 8px;border-radius:8px">📅 Dados de ${dateFrom} a ${dateTo}</span>` : ''}
+          <div class="search-wrap" style="max-width:280px">
             <span class="search-icon">🔍</span>
             <input type="text" class="search-input" id="perfSearch" placeholder="Buscar por título ou ID..." value="${State.performanceSearch || ''}" oninput="setPerfSearch(this.value)">
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button class="btn-outline" onclick="downloadPerfCSV()" title="Exportar CSV" style="font-size:12px;padding:5px 10px">⬇ CSV</button>
+            <button class="btn-outline" onclick="downloadPerfPDF()" title="Imprimir/PDF" style="font-size:12px;padding:5px 10px">🖨 PDF</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -1918,6 +1923,76 @@ function perfSummaryCard(icon, value, label) {
     </div>
   `;
 }
+
+window.downloadPerfCSV = function() {
+  if (!perfData || !perfData.items) return;
+  const { items, dateFrom, dateTo } = perfData;
+  const headers = ['ID','Título','Status','Visitas','Vendas','Conversão (%)','Receita (R$)','Ticket Médio (R$)','R$/Visita','Vis./Venda','Estoque','Tendência Visitas (%)'];
+  const rows = items.map(i => [
+    i.id, `"${(i.title||'').replace(/"/g,'""')}"`, i.status,
+    i.visits, i.sales, i.conversion.toFixed(2),
+    i.revenue.toFixed(2), i.avgTicket.toFixed(2),
+    i.revenuePerVisit.toFixed(2),
+    i.visitsPerSale > 0 ? i.visitsPerSale.toFixed(1) : '-',
+    i.available_quantity, i.visitGrowth.toFixed(1)
+  ]);
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `performance_${dateFrom||''}_${dateTo||''}.csv`;
+  a.click();
+};
+
+window.downloadPerfPDF = function() {
+  if (!perfData || !perfData.items) return;
+  const { items, summary, dateFrom, dateTo } = perfData;
+  const rows = items.map(i => `
+    <tr>
+      <td>${i.id}</td>
+      <td>${i.title || ''}</td>
+      <td>${i.status}</td>
+      <td>${i.visits}</td>
+      <td>${i.sales}</td>
+      <td>${i.conversion.toFixed(2)}%</td>
+      <td>R$ ${i.revenue.toFixed(2)}</td>
+      <td>R$ ${i.avgTicket.toFixed(2)}</td>
+      <td>${i.available_quantity}</td>
+      <td>${i.visitGrowth.toFixed(1)}%</td>
+    </tr>`).join('');
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+    <title>Performance ${dateFrom} a ${dateTo}</title>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:11px;margin:20px}
+      h1{font-size:16px;margin-bottom:4px}
+      .sub{font-size:12px;color:#666;margin-bottom:16px}
+      table{width:100%;border-collapse:collapse}
+      th{background:#222;color:#fff;padding:6px 4px;text-align:left;font-size:10px}
+      td{padding:5px 4px;border-bottom:1px solid #eee}
+      tr:nth-child(even){background:#f9f9f9}
+      .summary{display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+      .kpi{background:#f3f4f6;padding:8px 12px;border-radius:6px}
+      .kpi-label{font-size:10px;color:#666}
+      .kpi-val{font-size:14px;font-weight:bold}
+    </style></head><body>
+    <h1>Performance de Anúncios</h1>
+    <div class="sub">Período: ${dateFrom} a ${dateTo} — Gerado em ${new Date().toLocaleString('pt-BR')}</div>
+    <div class="summary">
+      <div class="kpi"><div class="kpi-label">Total Visitas</div><div class="kpi-val">${summary.totalVisits}</div></div>
+      <div class="kpi"><div class="kpi-label">Total Vendas</div><div class="kpi-val">${summary.totalSales}</div></div>
+      <div class="kpi"><div class="kpi-label">Receita Total</div><div class="kpi-val">R$ ${summary.totalRevenue.toFixed(2)}</div></div>
+      <div class="kpi"><div class="kpi-label">Conversão Média</div><div class="kpi-val">${summary.avgConversion.toFixed(2)}%</div></div>
+      <div class="kpi"><div class="kpi-label">Ticket Médio</div><div class="kpi-val">R$ ${summary.avgTicket.toFixed(2)}</div></div>
+    </div>
+    <table><thead><tr><th>ID</th><th>Título</th><th>Status</th><th>Visitas</th><th>Vendas</th><th>Conversão</th><th>Receita</th><th>Ticket Médio</th><th>Estoque</th><th>Tendência</th></tr></thead>
+    <tbody>${rows}</tbody></table>
+    </body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 500);
+};
 
 window.setPerfPeriod = (period) => {
   State.performancePeriod = period;

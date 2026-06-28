@@ -2246,15 +2246,20 @@ route('GET', '/api/performance', async (req, res, sess) => {
   const periodDays = { yesterday: 1, '3d': 3, '7d': 7, '15d': 15, '30d': 30 };
   const days = periodDays[period] || 7;
 
-  const fromDate = new Date(now - days * 86400000).toISOString().split('T')[0];
-  const prevFromDate = new Date(now - days * 2 * 86400000).toISOString().split('T')[0];
+  // Detect order data gap: if all orders are older than the requested period, shift window
+  const orderRange = db.prepare("SELECT MAX(date_created) as max_d, MIN(date_created) as min_d FROM orders WHERE store_id=? AND status='paid'").get(storeId);
+  const maxOrderDate = orderRange?.max_d ? new Date(orderRange.max_d) : now;
+  const useNow = maxOrderDate >= new Date(now - days * 86400000) ? now : maxOrderDate;
+
+  const fromDate    = new Date(useNow - days * 86400000).toISOString().split('T')[0];
+  const prevFromDate= new Date(useNow - days * 2 * 86400000).toISOString().split('T')[0];
 
   let dateFrom = fromDate;
-  let dateTo = today;
+  let dateTo   = useNow.toISOString().split('T')[0];
   if (period === 'yesterday') {
-    const yesterday = new Date(now - 86400000).toISOString().split('T')[0];
+    const yesterday = new Date(useNow - 86400000).toISOString().split('T')[0];
     dateFrom = yesterday;
-    dateTo = yesterday;
+    dateTo   = yesterday;
   }
 
   try {
@@ -2399,6 +2404,9 @@ route('GET', '/api/performance', async (req, res, sess) => {
       alerts: alerts.slice(0, 20),
       period,
       days,
+      dateFrom,
+      dateTo,
+      dataGap: maxOrderDate < new Date(now - days * 86400000),
     });
   } catch (e) {
     console.error('Performance error:', e.message);
