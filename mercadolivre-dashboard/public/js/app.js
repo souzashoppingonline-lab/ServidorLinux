@@ -93,23 +93,29 @@ const Modal = {
 // ROUTER
 // ============================================================
 const PAGES = {
-  dashboard: renderDashboard,
-  listings:  renderListings,
-  orders:    renderOrders,
-  questions: renderQuestions,
-  messages:  renderMessages,
-  metrics:   renderMetrics,
-  stores:    renderStores,
+  dashboard:        renderDashboard,
+  listings:         renderListings,
+  orders:           renderOrders,
+  questions:        renderQuestions,
+  messages:         renderMessages,
+  metrics:          renderMetrics,
+  stores:           renderStores,
+  hourly:           renderHourly,
+  weekday:          renderWeekday,
+  'products-analysis': renderProducts,
 };
 
 const PAGE_TITLES = {
-  dashboard: 'Dashboard',
-  listings:  'Anúncios',
-  orders:    'Pedidos',
-  questions: 'Perguntas',
-  messages:  'Mensagens',
-  metrics:   'Métricas',
-  stores:    'Lojas Conectadas',
+  dashboard:        'Dashboard',
+  listings:         'Anúncios',
+  orders:           'Pedidos',
+  questions:        'Perguntas',
+  messages:         'Mensagens',
+  metrics:          'Métricas',
+  stores:           'Lojas Conectadas',
+  hourly:           'Horários de Venda',
+  weekday:          'Dias da Semana',
+  'products-analysis': 'Ranking de Produtos',
 };
 
 function navigate(page) {
@@ -1119,6 +1125,379 @@ function paginationHtml(offset, limit, total, callbackFn) {
       </div>
     </div>
   `;
+}
+
+// ============================================================
+// PAGE: HORÁRIOS DE VENDA
+// ============================================================
+let hourlyDays = 7;
+
+async function renderHourly() {
+  loading();
+  try {
+    const data = await API.get(`/api/analytics/hourly?storeId=${State.currentStore}&days=${hourlyDays}`);
+    const { byHour, bestHours, totalOrders, totalRevenue, days } = data;
+
+    const maxOrders = Math.max(...byHour.map(h => h.orders), 1);
+
+    function barColor(pct) {
+      if (pct === 0)       return '#e5e7eb';
+      if (pct <= 0.20)     return '#fefce8';
+      if (pct <= 0.40)     return '#fef08a';
+      if (pct <= 0.60)     return '#facc15';
+      if (pct <= 0.80)     return '#f97316';
+      return '#ef4444';
+    }
+
+    const periodOptions = [1,3,5,7,10,15,21,30];
+
+    const html = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Horários de Venda</div>
+          <div class="page-subtitle">Distribuição de pedidos por hora do dia (Brasil UTC-3)</div>
+        </div>
+      </div>
+
+      <div class="period-selector">
+        ${periodOptions.map(d => `
+          <label class="period-btn ${d === hourlyDays ? 'active' : ''}">
+            <input type="radio" name="hourlyDays" value="${d}" ${d === hourlyDays ? 'checked' : ''}> ${d}d
+          </label>
+        `).join('')}
+      </div>
+
+      <div class="card mt-16">
+        <div class="card-title">📊 Mapa de Calor — Pedidos por Hora</div>
+        <div class="table-wrap">
+          <table class="heatmap-table">
+            <thead><tr><th>Hora</th><th>Distribuição</th><th>Pedidos</th><th>Faturamento</th></tr></thead>
+            <tbody>
+              ${byHour.map(h => {
+                const pct = h.orders / maxOrders;
+                const barW = Math.round(pct * 100);
+                const color = barColor(pct);
+                return `
+                  <tr>
+                    <td style="font-weight:600;white-space:nowrap">${String(h.hour).padStart(2,'0')}h</td>
+                    <td>
+                      <div class="heatmap-bar-wrap">
+                        <div class="heatmap-bar" style="width:${barW}%;background:${color}"></div>
+                      </div>
+                    </td>
+                    <td>${h.orders}</td>
+                    <td>${fmt.brl(h.revenue)}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card mt-16">
+        <div class="card-title">⭐ Melhores Horários</div>
+        <div class="best-hours-grid">
+          ${bestHours.map((h, idx) => `
+            <div class="kpi-card" style="--kpi-color:${idx === 0 ? '#FFE600' : idx === 1 ? '#f97316' : '#6366f1'}">
+              <div class="kpi-icon">${idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉'}</div>
+              <div class="kpi-label">${String(h.hour).padStart(2,'0')}h – ${String(h.hour+1).padStart(2,'0')}h</div>
+              <div class="kpi-value">${h.orders} pedidos</div>
+              <div class="kpi-sub">${fmt.brl(h.revenue)} · ticket ${fmt.brl(h.avgTicket)}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="card mt-16">
+        <div class="card-title">📈 Pedidos por Hora</div>
+        <div class="chart-container">
+          <canvas id="hourlyChart"></canvas>
+        </div>
+      </div>
+    `;
+
+    setContent(html);
+
+    // Period selector event
+    document.querySelectorAll('input[name="hourlyDays"]').forEach(el => {
+      el.addEventListener('change', () => {
+        hourlyDays = parseInt(el.value);
+        renderHourly();
+      });
+    });
+
+    // Chart
+    const ctx = document.getElementById('hourlyChart').getContext('2d');
+    State.charts.hourly = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: byHour.map(h => `${String(h.hour).padStart(2,'0')}h`),
+        datasets: [{
+          label: 'Pedidos',
+          data: byHour.map(h => h.orders),
+          borderColor: '#FFE600',
+          backgroundColor: 'rgba(255,230,0,0.12)',
+          borderWidth: 2.5,
+          pointRadius: 3,
+          fill: true,
+          tension: 0.4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { grid: { color: '#f0f2f8' }, beginAtZero: true, ticks: { stepSize: 1 } },
+        },
+      },
+    });
+
+  } catch (e) {
+    setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`);
+  }
+}
+
+// ============================================================
+// PAGE: DIAS DA SEMANA
+// ============================================================
+let weekdayDays = 30;
+
+async function renderWeekday() {
+  loading();
+  try {
+    const data = await API.get(`/api/analytics/weekday?storeId=${State.currentStore}&days=${weekdayDays}`);
+    const { byDay, bestDay, avgOrdersPerDay, days } = data;
+    const periodOptions = [7, 15, 30, 60];
+
+    const html = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Dias da Semana</div>
+          <div class="page-subtitle">Análise de vendas por dia da semana</div>
+        </div>
+      </div>
+
+      <div class="period-selector">
+        ${periodOptions.map(d => `
+          <label class="period-btn ${d === weekdayDays ? 'active' : ''}">
+            <input type="radio" name="weekdayDays" value="${d}" ${d === weekdayDays ? 'checked' : ''}> ${d}d
+          </label>
+        `).join('')}
+      </div>
+
+      <div class="weekday-grid mt-16">
+        ${byDay.map(d => `
+          <div class="weekday-card ${d.day === bestDay.day ? 'best' : ''}">
+            ${d.day === bestDay.day ? '<div class="weekday-best-label">Melhor dia</div>' : ''}
+            <div class="weekday-name">${d.name}</div>
+            <div class="weekday-orders">${d.orders}</div>
+            <div class="weekday-label">pedidos</div>
+            <div class="weekday-revenue">${fmt.brl(d.revenue)}</div>
+            <div class="weekday-ticket">ticket: ${fmt.brl(d.avgTicket)}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      ${bestDay ? `
+      <div class="card mt-16">
+        <div class="card-title">🏆 Melhor Dia</div>
+        <div style="display:flex;align-items:center;gap:24px;padding:8px 0">
+          <div style="font-size:48px;font-weight:900;color:var(--yellow)">${bestDay.name}</div>
+          <div>
+            <div style="font-size:13px;color:var(--text-2)">Pedidos totais no período</div>
+            <div style="font-size:28px;font-weight:800">${bestDay.orders}</div>
+            <div style="font-size:13px;color:var(--text-2);margin-top:4px">
+              ${avgOrdersPerDay > 0 ? `${((bestDay.orders / days - avgOrdersPerDay / 7) / (avgOrdersPerDay / 7) * 100).toFixed(0)}% acima da média diária` : ''}
+            </div>
+          </div>
+          <div style="margin-left:auto;text-align:right">
+            <div style="font-size:13px;color:var(--text-2)">Faturamento</div>
+            <div style="font-size:22px;font-weight:800">${fmt.brl(bestDay.revenue)}</div>
+            <div style="font-size:13px;color:var(--text-2);margin-top:4px">Ticket médio: ${fmt.brl(bestDay.avgTicket)}</div>
+          </div>
+        </div>
+      </div>` : ''}
+
+      <div class="card mt-16">
+        <div class="card-title">📊 Comparativo por Dia</div>
+        <div class="chart-container">
+          <canvas id="weekdayChart"></canvas>
+        </div>
+      </div>
+    `;
+
+    setContent(html);
+
+    document.querySelectorAll('input[name="weekdayDays"]').forEach(el => {
+      el.addEventListener('change', () => {
+        weekdayDays = parseInt(el.value);
+        renderWeekday();
+      });
+    });
+
+    const ctx = document.getElementById('weekdayChart').getContext('2d');
+    State.charts.weekday = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: byDay.map(d => d.name.slice(0,3)),
+        datasets: [{
+          label: 'Pedidos',
+          data: byDay.map(d => d.orders),
+          backgroundColor: byDay.map(d => d.day === bestDay.day ? '#FFE600' : 'rgba(255,230,0,0.3)'),
+          borderColor: byDay.map(d => d.day === bestDay.day ? '#d4af00' : '#FFE600'),
+          borderWidth: 1.5,
+          borderRadius: 6,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false } },
+          y: { grid: { color: '#f0f2f8' }, beginAtZero: true },
+        },
+      },
+    });
+
+  } catch (e) {
+    setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`);
+  }
+}
+
+// ============================================================
+// PAGE: RANKING DE PRODUTOS
+// ============================================================
+let productTab = 'ranking';
+let productDays = 30;
+
+async function renderProducts() {
+  loading();
+  try {
+    const tabs = [
+      { key: 'ranking',     label: 'Ranking'       },
+      { key: 'trending',    label: 'Explodindo'    },
+      { key: 'declining',   label: 'Caindo'        },
+      { key: 'problematic', label: 'Problemáticos' },
+    ];
+    const dayOptions = productTab === 'trending' || productTab === 'declining'
+      ? [14, 30, 60, 90] : [7, 15, 30, 60];
+
+    const data = await API.get(`/api/analytics/products?storeId=${State.currentStore}&days=${productDays}&type=${productTab}`);
+    const { products } = data;
+
+    let tableHtml = '';
+    if (productTab === 'ranking') {
+      tableHtml = `
+        <table>
+          <thead><tr><th>#</th><th>Produto</th><th class="text-right">Pedidos</th><th class="text-right">Unidades</th><th class="text-right">Receita</th><th class="text-right">Ticket Médio</th></tr></thead>
+          <tbody>
+            ${products.length ? products.map((p, i) => `
+              <tr>
+                <td style="color:var(--text-3);font-weight:600">${i+1}</td>
+                <td class="truncate" style="max-width:260px" title="${p.title}">${p.title}</td>
+                <td class="text-right">${p.orders}</td>
+                <td class="text-right">${p.units}</td>
+                <td class="text-right fw-bold">${fmt.brl(p.revenue)}</td>
+                <td class="text-right">${fmt.brl(p.avgTicket)}</td>
+              </tr>
+            `).join('') : '<tr><td colspan="6" class="text-center td-light" style="padding:32px">Nenhum produto encontrado.</td></tr>'}
+          </tbody>
+        </table>
+      `;
+    } else if (productTab === 'trending' || productTab === 'declining') {
+      tableHtml = `
+        <table>
+          <thead><tr><th>Produto</th><th class="text-right">Últimos 7d</th><th class="text-right">Período anterior</th><th class="text-right">Variação</th></tr></thead>
+          <tbody>
+            ${products.length ? products.map(p => `
+              <tr>
+                <td class="truncate" style="max-width:300px" title="${p.title}">${p.title}</td>
+                <td class="text-right">${p.recent7d} pedidos</td>
+                <td class="text-right">${p.prevPeriod} pedidos</td>
+                <td class="text-right">
+                  <span class="badge ${p.variation >= 0 ? 'badge-green' : 'badge-red'}">
+                    ${p.variation >= 0 ? '+' : ''}${p.variation.toFixed(1)}%
+                  </span>
+                </td>
+              </tr>
+            `).join('') : '<tr><td colspan="4" class="text-center td-light" style="padding:32px">Nenhum produto encontrado.</td></tr>'}
+          </tbody>
+        </table>
+      `;
+    } else if (productTab === 'problematic') {
+      tableHtml = `
+        <table>
+          <thead><tr><th>ID do Produto</th><th class="text-right">Dias sem vender</th></tr></thead>
+          <tbody>
+            ${products.length ? products.map(p => `
+              <tr>
+                <td style="font-family:monospace;font-size:13px">${p.id}</td>
+                <td class="text-right">
+                  <span class="badge badge-red">${p.daysSinceLastSale}+ dias</span>
+                </td>
+              </tr>
+            `).join('') : '<tr><td colspan="2" class="text-center td-light" style="padding:32px">Nenhum produto problemático encontrado.</td></tr>'}
+          </tbody>
+        </table>
+      `;
+    }
+
+    const html = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Ranking de Produtos</div>
+          <div class="page-subtitle">Análise de desempenho por produto</div>
+        </div>
+      </div>
+
+      <div class="analytics-tabs">
+        ${tabs.map(t => `
+          <button class="analytics-tab ${t.key === productTab ? 'active' : ''}" data-tab="${t.key}">${t.label}</button>
+        `).join('')}
+      </div>
+
+      <div class="period-selector mt-12">
+        ${dayOptions.map(d => `
+          <label class="period-btn ${d === productDays ? 'active' : ''}">
+            <input type="radio" name="productDays" value="${d}" ${d === productDays ? 'checked' : ''}> ${d}d
+          </label>
+        `).join('')}
+      </div>
+
+      <div class="card mt-16">
+        <div class="card-title">
+          ${tabs.find(t => t.key === productTab)?.label} — ${products.length} produto${products.length !== 1 ? 's' : ''}
+        </div>
+        <div class="table-wrap">
+          ${tableHtml}
+        </div>
+      </div>
+    `;
+
+    setContent(html);
+
+    document.querySelectorAll('.analytics-tab').forEach(el => {
+      el.addEventListener('click', () => {
+        productTab = el.dataset.tab;
+        productDays = productTab === 'trending' || productTab === 'declining' ? 30 : 30;
+        renderProducts();
+      });
+    });
+
+    document.querySelectorAll('input[name="productDays"]').forEach(el => {
+      el.addEventListener('change', () => {
+        productDays = parseInt(el.value);
+        renderProducts();
+      });
+    });
+
+  } catch (e) {
+    setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`);
+  }
 }
 
 // ============================================================

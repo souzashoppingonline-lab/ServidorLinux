@@ -978,3 +978,159 @@ tr:hover td { background: #fafafa; }
   z-index: 99;
 }
 .sidebar-overlay.show { display: block; }
+
+/* ============================================================
+   ANALYTICS — NAV SECTION TITLE
+   ============================================================ */
+.nav-section-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.35);
+  padding: 16px 16px 4px;
+  margin-top: 4px;
+}
+
+/* ============================================================
+   ANALYTICS — PERIOD SELECTOR
+   ============================================================ */
+.period-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.period-btn {
+  display: inline-block;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--card);
+  border: 1.5px solid var(--border);
+  color: var(--text-2);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  user-select: none;
+}
+.period-btn input[type="radio"] { display: none; }
+.period-btn.active,
+.period-btn:has(input:checked) {
+  background: var(--yellow);
+  border-color: var(--yellow);
+  color: #1a1f36;
+}
+
+/* ============================================================
+   ANALYTICS — HEATMAP TABLE
+   ============================================================ */
+.heatmap-table td,
+.heatmap-table th { padding: 5px 10px; font-size: 13px; }
+.heatmap-table tr:hover td { background: var(--bg); }
+
+.heatmap-bar-wrap {
+  width: 180px;
+  height: 16px;
+  background: #f0f2f8;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.heatmap-bar {
+  height: 100%;
+  border-radius: 4px;
+  min-width: 2px;
+  transition: width 0.3s ease;
+}
+
+/* ============================================================
+   ANALYTICS — BEST HOURS GRID
+   ============================================================ */
+.best-hours-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-top: 4px;
+}
+@media (max-width: 700px) {
+  .best-hours-grid { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   ANALYTICS — WEEKDAY GRID & CARDS
+   ============================================================ */
+.weekday-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .weekday-grid { grid-template-columns: repeat(4, 1fr); }
+}
+@media (max-width: 500px) {
+  .weekday-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+.weekday-card {
+  background: var(--card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 12px;
+  text-align: center;
+  position: relative;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.weekday-card.best {
+  border-color: var(--yellow);
+  box-shadow: 0 0 0 3px rgba(255,230,0,0.15);
+}
+.weekday-best-label {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--yellow);
+  color: #1a1f36;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.weekday-name   { font-size: 13px; font-weight: 700; color: var(--text-2); margin-bottom: 8px; }
+.weekday-orders { font-size: 26px; font-weight: 900; color: var(--text); }
+.weekday-label  { font-size: 11px; color: var(--text-3); margin-bottom: 6px; }
+.weekday-revenue { font-size: 13px; font-weight: 600; color: var(--text); }
+.weekday-ticket  { font-size: 11px; color: var(--text-2); margin-top: 2px; }
+
+/* ============================================================
+   ANALYTICS — TABS
+   ============================================================ */
+.analytics-tabs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.analytics-tab {
+  padding: 8px 18px;
+  border-radius: 8px 8px 0 0;
+  border: 1.5px solid var(--border);
+  border-bottom: none;
+  background: var(--bg);
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.analytics-tab.active {
+  background: var(--card);
+  color: var(--text);
+  border-color: var(--border);
+}
+.analytics-tab:hover:not(.active) {
+  background: var(--card);
+  color: var(--text);
+}
+.mt-12 { margin-top: 12px; }

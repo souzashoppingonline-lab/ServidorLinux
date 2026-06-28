@@ -641,6 +641,206 @@ route('POST', '/api/messages', async (req, res, sess) => {
   }
 });
 
+// ── Analytics shared order fetcher ────────────────────────
+async function fetchOrdersShared(storeId, days) {
+  const cKey = `orders:shared:${storeId}:${days}`;
+  const cached = cacheGet(cKey);
+  if (cached) return cached;
+  const now = new Date();
+  const from = new Date(now - days * 86400000).toISOString().split('T')[0];
+  const allOrders = [];
+  for (let offset = 0; offset < 300; offset += 50) {
+    const page = await mlFetch(
+      `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_desc`,
+      {}, storeId
+    ).catch(() => null);
+    if (!page || !page.results?.length) break;
+    allOrders.push(...page.results);
+    if (page.results.length < 50) break;
+    if (offset > 0) await new Promise(r => setTimeout(r, 200));
+  }
+  cacheSet(cKey, allOrders, 300);
+  return allOrders;
+}
+
+// ── Analytics: hourly ──────────────────────────────────────
+route('GET', '/api/analytics/hourly', async (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const days    = Math.min(parseInt(p.get('days') || '7'), 30);
+  const cKey    = `analytics:hourly:${storeId}:${days}`;
+  const cached  = cacheGet(cKey);
+  if (cached) { ok(res, cached); return; }
+
+  try {
+    const allOrders = await fetchOrdersShared(storeId, days);
+
+    const byHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, orders: 0, revenue: 0 }));
+    allOrders.forEach(o => {
+      const d = new Date(o.date_created);
+      // Convert UTC to Brazil UTC-3
+      const h = ((d.getUTCHours() - 3) + 24) % 24;
+      byHour[h].orders++;
+      byHour[h].revenue += o.total_amount || 0;
+    });
+    byHour.forEach(h => { h.avgTicket = h.orders > 0 ? h.revenue / h.orders : 0; });
+
+    const sorted = [...byHour].sort((a, b) => b.orders - a.orders);
+    const bestHours = sorted.slice(0, 3);
+
+    const result = {
+      byHour,
+      bestHours,
+      totalOrders: allOrders.length,
+      totalRevenue: allOrders.reduce((s, o) => s + (o.total_amount || 0), 0),
+      days,
+    };
+    cacheSet(cKey, result, 300);
+    ok(res, result);
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Analytics: weekday ─────────────────────────────────────
+route('GET', '/api/analytics/weekday', async (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const days    = Math.min(parseInt(p.get('days') || '30'), 90);
+  const cKey    = `analytics:weekday:${storeId}:${days}`;
+  const cached  = cacheGet(cKey);
+  if (cached) { ok(res, cached); return; }
+
+  try {
+    const allOrders = await fetchOrdersShared(storeId, days);
+    const dayNames = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+    const byDay = Array.from({ length: 7 }, (_, d) => ({ day: d, name: dayNames[d], orders: 0, revenue: 0 }));
+
+    allOrders.forEach(o => {
+      const d = new Date(o.date_created);
+      // Adjust to Brazil UTC-3
+      const adjustedMs = d.getTime() - 3 * 3600000;
+      const dow = new Date(adjustedMs).getUTCDay();
+      byDay[dow].orders++;
+      byDay[dow].revenue += o.total_amount || 0;
+    });
+    byDay.forEach(d => { d.avgTicket = d.orders > 0 ? d.revenue / d.orders : 0; });
+
+    const bestDay = [...byDay].sort((a, b) => b.orders - a.orders)[0];
+    const avgOrdersPerDay = allOrders.length / (days || 1);
+
+    const result = { byDay, bestDay, avgOrdersPerDay, days };
+    cacheSet(cKey, result, 300);
+    ok(res, result);
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Analytics: products ────────────────────────────────────
+route('GET', '/api/analytics/products', async (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const days    = Math.min(parseInt(p.get('days') || '30'), 90);
+  const type    = p.get('type') || 'ranking';
+  const cKey    = `analytics:products:${storeId}:${days}:${type}`;
+  const cached  = cacheGet(cKey);
+  if (cached) { ok(res, cached); return; }
+
+  try {
+    const allOrders = await fetchOrdersShared(storeId, days);
+
+    if (type === 'ranking') {
+      const byProduct = {};
+      allOrders.forEach(o => {
+        (o.order_items || []).forEach(i => {
+          const id = i.item?.id;
+          if (!id) return;
+          if (!byProduct[id]) byProduct[id] = { id, title: i.item?.title || id, orders: 0, units: 0, revenue: 0 };
+          byProduct[id].orders++;
+          byProduct[id].units   += i.quantity || 0;
+          byProduct[id].revenue += (i.unit_price || 0) * (i.quantity || 0);
+        });
+      });
+      const products = Object.values(byProduct)
+        .sort((a, b) => b.revenue - a.revenue)
+        .slice(0, 50)
+        .map(pr => ({ ...pr, avgTicket: pr.orders > 0 ? pr.revenue / pr.orders : 0 }));
+      const result = { products, days, type };
+      cacheSet(cKey, result, 300);
+      ok(res, result);
+
+    } else if (type === 'trending' || type === 'declining') {
+      const last7Orders = await fetchOrdersShared(storeId, 7);
+      const prevOrders  = allOrders.filter(o => {
+        const d = new Date(o.date_created);
+        const age = (Date.now() - d.getTime()) / 86400000;
+        return age > 7 && age <= days;
+      });
+      const prevDays = days - 7;
+
+      function buildProductMap(orders) {
+        const m = {};
+        orders.forEach(o => {
+          (o.order_items || []).forEach(i => {
+            const id = i.item?.id;
+            if (!id) return;
+            if (!m[id]) m[id] = { id, title: i.item?.title || id, orders: 0, units: 0, revenue: 0 };
+            m[id].orders++;
+            m[id].units   += i.quantity || 0;
+            m[id].revenue += (i.unit_price || 0) * (i.quantity || 0);
+          });
+        });
+        return m;
+      }
+
+      const recentMap = buildProductMap(last7Orders);
+      const prevMap   = buildProductMap(prevOrders);
+      const allIds    = new Set([...Object.keys(recentMap), ...Object.keys(prevMap)]);
+
+      const products = [];
+      allIds.forEach(id => {
+        const recent = recentMap[id] || { orders: 0, revenue: 0 };
+        const prev   = prevMap[id]   || { orders: 0, revenue: 0 };
+        const recentRate = recent.orders / 7;
+        const prevRate   = prevDays > 0 ? prev.orders / prevDays : 0;
+        if (prevRate === 0 && recentRate === 0) return;
+        const variation = prevRate > 0 ? ((recentRate - prevRate) / prevRate) * 100 : (recentRate > 0 ? 100 : 0);
+        const title = (recentMap[id] || prevMap[id])?.title || id;
+
+        if (type === 'trending'  && variation >= 20)  products.push({ id, title, recent7d: recent.orders, prevPeriod: prev.orders, variation });
+        if (type === 'declining' && variation <= -20) products.push({ id, title, recent7d: recent.orders, prevPeriod: prev.orders, variation });
+      });
+
+      products.sort((a, b) => type === 'trending' ? b.variation - a.variation : a.variation - b.variation);
+      const result = { products, days, type };
+      cacheSet(cKey, result, 300);
+      ok(res, result);
+
+    } else if (type === 'problematic') {
+      const soldIds = new Set();
+      allOrders.forEach(o => {
+        (o.order_items || []).forEach(i => { if (i.item?.id) soldIds.add(String(i.item.id)); });
+      });
+
+      const search = await mlFetch(`/users/${storeId}/items/search?status=active&limit=100`, {}, storeId).catch(() => ({ results: [] }));
+      const allItemIds = search.results || [];
+      const problematic = allItemIds
+        .filter(id => !soldIds.has(String(id)))
+        .slice(0, 100)
+        .map(id => ({ id, title: id, daysSinceLastSale: days }));
+
+      const result = { products: problematic, days, type };
+      cacheSet(cKey, result, 300);
+      ok(res, result);
+    } else {
+      apiErr(res, 400, 'type inválido');
+    }
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
 // ── Metrics ────────────────────────────────────────────────
 route('GET', '/api/metrics', async (req, res, sess) => {
   const p       = qp(req);
