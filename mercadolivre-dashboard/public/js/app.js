@@ -205,7 +205,8 @@ async function init() {
     });
 
     // WebSocket for real-time updates
-    const ws = new WebSocket(`ws://${location.host}`);
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProto}://${location.host}`);
     ws.onmessage = e => {
       const msg = JSON.parse(e.data);
       if (msg.type === 'webhook') {
