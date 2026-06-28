@@ -2588,10 +2588,19 @@ window.openCustomer = async function(buyerId, nickname) {
       confirmed: '#3b82f6', in_process: '#3b82f6',
     };
 
+    const fmtOrderId = id => {
+      const s = String(id);
+      return s.length > 10 ? s.slice(-10) : s;
+    };
+    const fmtFull = d => d ? new Date(d).toLocaleString('pt-BR', {
+      day: '2-digit', month: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit'
+    }) : '-';
+
     const orderRows = orders.map(o => `
       <tr>
-        <td style="font-size:12px;color:var(--text-2)">#${o.id}</td>
-        <td style="font-size:12px">${fmt.dt(o.date_created)}</td>
+        <td style="font-size:12px;color:var(--text-2);font-family:monospace">#${fmtOrderId(o.id)}</td>
+        <td style="font-size:12px;white-space:nowrap">${fmtFull(o.date_created)}</td>
         <td style="font-size:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${o.items||''}">${o.items||'-'}</td>
         <td style="font-size:12px;text-align:right;font-weight:600">${fmt.brl(o.total_amount)}</td>
         <td style="font-size:12px">${o.receiver_city ? `${o.receiver_city}/${o.receiver_state_code||''}` : '-'}</td>
@@ -2621,10 +2630,10 @@ window.openCustomer = async function(buyerId, nickname) {
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">
           <div><span style="color:var(--text-2)">Tipo: </span>${recTag}</div>
           <div><span style="color:var(--text-2)">Localização: </span><strong>${locStr}</strong></div>
-          <div><span style="color:var(--text-2)">Primeira compra: </span><strong>${fmt.dt(c.first_order_at)}</strong></div>
+          <div><span style="color:var(--text-2)">Primeira compra: </span><strong>${fmtFull(c.first_order_at)}</strong></div>
           <div><span style="color:var(--text-2)">Última compra: </span>
             <strong style="color:${daysSinceLast<=30?'#22c55e':daysSinceLast<=90?'#f59e0b':'#ef4444'}">
-              ${fmt.dt(c.last_order_at)}${daysSinceLast!==null?` (${daysSinceLast}d atrás)`:''}
+              ${fmtFull(c.last_order_at)}${daysSinceLast!==null?` (${daysSinceLast}d atrás)`:''}
             </strong>
           </div>
           <div><span style="color:var(--text-2)">ID ML: </span><span style="font-family:monospace;font-size:12px">#${c.buyer_id}</span></div>
