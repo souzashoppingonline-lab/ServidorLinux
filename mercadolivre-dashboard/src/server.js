@@ -530,9 +530,22 @@ const JOB_HANDLERS = {
   async sync_orders(storeId) {
     const log = db.prepare('SELECT last_sync FROM sync_log WHERE store_id=? AND entity=?').get(storeId, 'orders');
     const lastSync = log?.last_sync || 0;
-    const from = lastSync > 0
-      ? new Date(lastSync * 1000 - 300000).toISOString() // 5min overlap to catch updates
-      : new Date(Date.now() - 90 * 86400000).toISOString();
+
+    // Detect gap: if last order in DB is older than lastSync, backfill from max DB date
+    const maxRow = db.prepare("SELECT MAX(date_created) as max_d FROM orders WHERE store_id=?").get(storeId);
+    const maxDbDate = maxRow?.max_d ? new Date(maxRow.max_d) : null;
+    const lastSyncDate = lastSync > 0 ? new Date(lastSync * 1000) : null;
+
+    let from;
+    if (!lastSync) {
+      from = new Date(Date.now() - 90 * 86400000).toISOString(); // first run: 90 days back
+    } else if (maxDbDate && lastSyncDate && (lastSyncDate - maxDbDate) > 2 * 86400000) {
+      // Gap detected: last sync was >2 days after newest order → backfill from max DB date
+      from = new Date(maxDbDate.getTime() - 300000).toISOString();
+      console.log(`[sync] orders BACKFILL detected gap: max_db=${maxDbDate.toISOString().split('T')[0]} last_sync=${lastSyncDate.toISOString().split('T')[0]}`);
+    } else {
+      from = new Date(lastSync * 1000 - 300000).toISOString(); // 5min overlap
+    }
     const fromStr = from.split('T')[0];
 
     console.log(`[sync] orders store=${storeId} from=${fromStr}`);
@@ -2144,13 +2157,30 @@ route('GET', '/api/analytics/products', (req, res, sess) => {
 route('GET', '/api/metrics', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
-  const days    = Math.min(parseInt(p.get('days') || '30'), 90);
-  const cKey    = `metrics:${storeId}:${days}`;
-  const cached  = cacheGet(cKey);
+  const daysParam = p.get('days') || '30';
+  const allTime  = daysParam === 'all';
+  const days     = allTime ? 365 : Math.min(parseInt(daysParam), 365);
+  const cKey     = `metrics:${storeId}:${daysParam}`;
+  const cached   = cacheGet(cKey);
   if (cached) { ok(res, cached); return; }
 
   try {
-    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    // If no data in requested period, auto-extend to use available DB range
+    const maxRow = db.prepare("SELECT MAX(date_created) as max_d, MIN(date_created) as min_d FROM orders WHERE store_id=? AND status='paid'").get(storeId);
+    let fromDate;
+    let actualDays = days;
+    if (allTime && maxRow?.min_d) {
+      fromDate = maxRow.min_d;
+    } else {
+      fromDate = new Date(Date.now() - days * 86400000).toISOString();
+      // Auto-detect gap: if latest order is older than our from date, shift window
+      if (maxRow?.max_d && new Date(maxRow.max_d) < new Date(fromDate)) {
+        const maxD = new Date(maxRow.max_d);
+        fromDate = new Date(maxD.getTime() - days * 86400000).toISOString();
+        console.log(`[metrics] gap detected — shifting window to data range around ${maxRow.max_d}`);
+      }
+    }
+
     const allOrders = db.prepare(
       "SELECT id, date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
     ).all(storeId, fromDate);
@@ -2175,15 +2205,21 @@ route('GET', '/api/metrics', (req, res, sess) => {
       daily[day].orders++;
     });
 
-    const now = new Date();
+    // Build daily chart from actual data range
+    const fromTs  = new Date(fromDate).getTime();
+    const toTs    = allOrders.length > 0
+      ? Math.max(...allOrders.map(o => new Date(o.date_created).getTime()))
+      : Date.now();
+    const chartDays = Math.min(Math.ceil((toTs - fromTs) / 86400000) + 1, 365);
+    const startTs   = new Date(fromDate).setHours(0, 0, 0, 0);
     const dailyChart = [];
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(now - i * 86400000).toISOString().split('T')[0];
+    for (let i = 0; i < chartDays; i++) {
+      const d = new Date(startTs + i * 86400000).toISOString().split('T')[0];
       dailyChart.push(daily[d] || { date: d, revenue: 0, orders: 0 });
     }
 
     const result = {
-      summary: { totalRevenue, totalOrders, avgTicket },
+      summary: { totalRevenue, totalOrders, avgTicket, fromDate: fromDate.split('T')[0] },
       dailyChart,
       topProducts: topProducts.map(p => ({ id: p.id, title: p.title || p.id, revenue: p.revenue, units: p.units })),
     };

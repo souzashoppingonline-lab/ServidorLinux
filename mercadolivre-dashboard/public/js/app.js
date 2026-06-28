@@ -981,6 +981,7 @@ async function renderMetrics() {
     </div>
     <div class="metrics-period">
       ${[7, 30, 60, 90].map(d => `<button class="period-btn ${metricsDays===d?'active':''}" onclick="setMetricsDays(${d})">${d} dias</button>`).join('')}
+      <button class="period-btn ${metricsDays==='all'?'active':''}" onclick="setMetricsDays('all')">Tudo</button>
     </div>
     <div id="metricsBody"><div class="loading-state"><div class="spinner"></div></div></div>
   `);
@@ -989,7 +990,10 @@ async function renderMetrics() {
 
 window.setMetricsDays = async (days) => {
   metricsDays = days;
-  document.querySelectorAll('.period-btn').forEach(b => b.classList.toggle('active', b.textContent === `${days} dias`));
+  document.querySelectorAll('.period-btn').forEach(b => {
+    const label = b.textContent.trim();
+    b.classList.toggle('active', label === (days === 'all' ? 'Tudo' : `${days} dias`));
+  });
   await loadMetrics();
 };
 
@@ -1001,11 +1005,13 @@ async function loadMetrics() {
   try {
     const data = await API.metrics(State.currentStore, metricsDays);
     const { summary, dailyChart, topProducts } = data;
+    const periodoLabel = metricsDays === 'all' ? 'Todo o histórico' : `Últimos ${metricsDays} dias`;
+    const fromLabel = summary.fromDate ? ` (a partir de ${new Date(summary.fromDate).toLocaleDateString('pt-BR')})` : '';
 
     wrap.innerHTML = `
       <div class="kpi-grid" style="grid-template-columns:repeat(3,1fr)">
-        ${kpiCard('Receita Total', fmt.brl(summary.totalRevenue), `Últimos ${metricsDays} dias`, '💰', '#FFE600')}
-        ${kpiCard('Total de Pedidos', fmt.num(summary.totalOrders), `Últimos ${metricsDays} dias`, '🛒', '#10b981')}
+        ${kpiCard('Receita Total', fmt.brl(summary.totalRevenue), periodoLabel + fromLabel, '💰', '#FFE600')}
+        ${kpiCard('Total de Pedidos', fmt.num(summary.totalOrders), periodoLabel, '🛒', '#10b981')}
         ${kpiCard('Ticket Médio', fmt.brl(summary.avgTicket), 'Por pedido', '📊', '#8b5cf6')}
       </div>
 
