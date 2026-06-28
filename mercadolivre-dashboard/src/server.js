@@ -1873,16 +1873,16 @@ route('GET', '/api/debug/visits', (req, res) => {
   ok(res, { count, sample, byDate, syncLog, activeListings });
 }, true);
 
-route('GET', '/api/debug/ads', async (req, res) => {
+route('GET', '/api/debug/ads', (req, res) => {
   const storeId = qp(req).get('storeId') || '1662123376';
   try {
-    const camps  = db.prepare('SELECT COUNT(*) as n FROM ads_campaigns WHERE store_id=?').get(storeId);
-    const metr   = db.prepare('SELECT COUNT(*) as n FROM ads_daily_metrics WHERE store_id=?').get(storeId);
-    const syncC  = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(storeId);
-    const syncM  = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
-    // Test advertiser endpoint live
-    const advRaw = await mlFetch(`/advertising/advertisers?user_id=${storeId}`, {}, storeId).catch(e => ({ _error: e.message }));
-    ok(res, { campaigns: camps, metrics: metr, syncCampaigns: syncC, syncMetrics: syncM, advertiserRaw: advRaw });
+    const camps     = db.prepare('SELECT COUNT(*) as n FROM ads_campaigns WHERE store_id=?').get(storeId);
+    const campList  = db.prepare('SELECT id,name,status FROM ads_campaigns WHERE store_id=? LIMIT 5').all(storeId);
+    const metr      = db.prepare('SELECT COUNT(*) as n FROM ads_daily_metrics WHERE store_id=?').get(storeId);
+    const metrSamp  = db.prepare('SELECT * FROM ads_daily_metrics WHERE store_id=? ORDER BY date DESC LIMIT 3').all(storeId);
+    const syncC     = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(storeId);
+    const syncM     = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
+    ok(res, { campaigns: camps, campaignSample: campList, metrics: metr, metricsSample: metrSamp, syncCampaigns: syncC, syncMetrics: syncM });
   } catch (e) {
     ok(res, { error: e.message });
   }
