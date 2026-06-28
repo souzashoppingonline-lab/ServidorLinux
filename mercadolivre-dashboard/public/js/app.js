@@ -1746,7 +1746,8 @@ async function renderPerformance() {
       <div class="card">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
           <div class="card-title" style="margin-bottom:0">📋 Todos os Anúncios</div>
-          ${dataGap ? `<span style="font-size:11px;background:#fef3c7;color:#92400e;padding:3px 8px;border-radius:8px">📅 Dados de ${dateFrom} a ${dateTo}</span>` : ''}
+          <span style="font-size:11px;background:#dbeafe;color:#1e40af;padding:3px 8px;border-radius:8px">Visitas: ${dateFrom} a ${dateTo}</span>
+          ${dataGap ? `<span style="font-size:11px;background:#fef3c7;color:#92400e;padding:3px 8px;border-radius:8px" title="Pedidos desatualizados — clique em Sync para atualizar">⚠ Vendas: ${data.ordersDateFrom} a ${data.ordersDateTo}</span>` : `<span style="font-size:11px;background:#d1fae5;color:#065f46;padding:3px 8px;border-radius:8px">Vendas: ${data.ordersDateFrom} a ${data.ordersDateTo}</span>`}
           <div class="search-wrap" style="max-width:280px">
             <span class="search-icon">🔍</span>
             <input type="text" class="search-input" id="perfSearch" placeholder="Buscar por título ou ID..." value="${State.performanceSearch || ''}" oninput="setPerfSearch(this.value)">
