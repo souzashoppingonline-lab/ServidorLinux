@@ -149,16 +149,31 @@ async function exchangeCode(code) {
     redirect_uri:  ML_REDIRECT_URI,
   });
   console.log('[oauth] Trocando code. redirect_uri:', ML_REDIRECT_URI);
-  console.log('[oauth] Payload:', body.toString().replace(ML_APP_SECRET, '***'));
-  const res = await fetch(ML_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: body.toString(),
-  });
-  const text = await res.text();
-  console.log('[oauth] ML response', res.status, ':', text.slice(0, 500));
-  if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text}`);
-  return JSON.parse(text);
+
+  // Retry with backoff on 429
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      const wait = attempt * 5000;
+      console.log(`[oauth] Aguardando ${wait}ms antes de retry ${attempt}...`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+    const res = await fetch(ML_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: body.toString(),
+    });
+    const text = await res.text();
+    console.log('[oauth] ML response', res.status, ':', text.slice(0, 300));
+    if (res.status === 429) {
+      const retryAfter = parseInt(res.headers.get('retry-after') || '10', 10);
+      console.log(`[oauth] Rate limit 429 — aguardando ${retryAfter}s...`);
+      await new Promise(r => setTimeout(r, retryAfter * 1000));
+      continue;
+    }
+    if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text.slice(0, 200)}`);
+    return JSON.parse(text);
+  }
+  throw new Error('Troca de código falhou após retries (rate limit ML)');
 }
 
 // ============================================================
@@ -251,10 +266,20 @@ route('GET', '/ml/connect', (req, res) => {
 route('GET', '/ml/callback', async (req, res) => {
   const url   = new URL(req.url, 'http://localhost');
   const code  = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
   const error = url.searchParams.get('error');
 
   if (error || !code) {
     res.writeHead(302, { Location: '/login?error=auth_failed' });
+    res.end();
+    return;
+  }
+
+  // Validate state to prevent duplicate callbacks
+  const cookieState = (req.headers.cookie || '').match(/ml_state=([a-f0-9]{32})/)?.[1];
+  if (state && cookieState && state !== cookieState) {
+    console.warn('[oauth] State mismatch — possível callback duplicado, ignorando');
+    res.writeHead(302, { Location: '/login?error=state_mismatch' });
     res.end();
     return;
   }
