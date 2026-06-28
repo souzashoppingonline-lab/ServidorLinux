@@ -22,14 +22,15 @@ const ML_TOKEN_URL = 'https://api.mercadolibre.com/oauth/token';
 const ML_API       = 'https://api.mercadolibre.com';
 
 const SCHEDULER_CONFIG = {
-  batchSize: 5,           // items per batch
-  batchDelay: 300000,     // 5 minutes between batches (ms)
-  minDelay: 500,          // minimum delay between API calls (ms)
-  maxCallsPerMinute: 20,  // max API calls per minute
-  ordersInterval: 600000, // 10 minutes
-  questionsInterval: 900000, // 15 minutes
-  stockInterval: 7200000, // 2 hours
-  visitsHour: 2,          // 2am for visits sync
+  batchSize: 5,             // items per batch
+  batchDelay: 600000,       // 10 minutes between listing batches (ms)
+  minDelay: 1000,           // minimum delay between API calls (ms)
+  maxCallsPerMinute: 15,    // max API calls per minute (ML free tier ~20/min, leave headroom)
+  ordersInterval: 900000,   // 15 minutes
+  questionsInterval: 1200000, // 20 minutes
+  stockInterval: 7200000,   // 2 hours
+  visitsHour: 3,            // 3am for visits sync
+  visitsDelayMs: 3000,      // 3s between each day fetch for visits
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -231,17 +232,25 @@ const RateLimiter = {
     this.callsThisMinute++;
   },
 
-  on429() {
+  on429(retryAfterSec = 30) {
     this.consecutive429++;
-    this.currentDelay = Math.min(this.currentDelay * 2, 30000);
+    // Back off aggressively: use the retry-after header value, minimum 30s
+    const backoffMs = Math.max(retryAfterSec * 1000, 30000);
+    this.currentDelay = Math.min(Math.max(this.currentDelay * 2, backoffMs), 120000);
     console.log(`[ratelimit] 429 detectado (#${this.consecutive429}) — delay aumentado para ${this.currentDelay}ms`);
   },
 
   onSuccess() {
     if (this.consecutive429 > 0) {
       this.consecutive429 = 0;
-      this.currentDelay = Math.max(this.currentDelay * 0.8, SCHEDULER_CONFIG.minDelay);
+      this.currentDelay = Math.max(this.currentDelay * 0.85, SCHEDULER_CONFIG.minDelay);
     }
+  },
+
+  // Hard pause: stop all calls for N seconds (used after consecutive 429s)
+  async pause(ms) {
+    console.log(`[ratelimit] Pausa forçada de ${ms/1000}s para recuperar rate limit`);
+    await new Promise(r => setTimeout(r, ms));
   },
 };
 
@@ -274,10 +283,10 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
       .run(storeId || '', apiPath.slice(0, 200), opts.method || 'GET', res.status, duration, rlRemaining);
 
     if (res.status === 429) {
-      RateLimiter.on429();
-      const wait = parseInt(res.headers.get('x-ratelimit-reset') || res.headers.get('retry-after') || '5', 10);
-      console.log(`[api] 429 em ${apiPath} — aguardando ${wait}s...`);
-      await new Promise(r => setTimeout(r, Math.min(wait, 30) * 1000));
+      const retrySec = parseInt(res.headers.get('retry-after') || res.headers.get('x-ratelimit-reset') || '30', 10);
+      RateLimiter.on429(retrySec);
+      console.log(`[api] 429 em ${apiPath} — aguardando ${retrySec}s...`);
+      await new Promise(r => setTimeout(r, Math.min(retrySec, 60) * 1000));
       continue;
     }
     if (!res.ok) {
@@ -474,27 +483,29 @@ const JOB_HANDLERS = {
     const now = new Date();
     const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id,store_id,date,visits) VALUES(?,?,?,?)');
 
-    // Sync each of the last 31 days
-    for (let d = 1; d <= 31; d++) {
-      const date = new Date(now - d * 86400000);
-      const dateStr = date.toISOString().split('T')[0];
+    // Use a single range request instead of 31 individual day requests
+    // ML API supports date_from/date_to ranges returning aggregated data
+    const dateTo   = new Date(now - 86400000).toISOString().split('T')[0];   // yesterday
+    const dateFrom = new Date(now - 31 * 86400000).toISOString().split('T')[0]; // 31 days ago
 
-      const data = await mlFetch(
-        `/users/${storeId}/items/visits?date_from=${dateStr}&date_to=${dateStr}`,
-        {}, storeId
-      ).catch(() => null);
+    const data = await mlFetch(
+      `/users/${storeId}/items/visits?date_from=${dateFrom}&date_to=${dateTo}`,
+      {}, storeId
+    ).catch(e => { console.error('[sync] visits error:', e.message); return null; });
 
-      if (data?.items_visits?.length) {
-        db.transaction((items) => {
-          for (const item of items) {
-            if (item.id && item.total_visits > 0) insert.run(item.id, storeId, dateStr, item.total_visits);
+    if (data?.items_visits?.length) {
+      db.transaction((items) => {
+        for (const item of items) {
+          if (item.id && item.total_visits > 0) {
+            // Store as the total for the period (no daily granularity from range query)
+            insert.run(item.id, storeId, dateTo, item.total_visits);
           }
-        })(data.items_visits);
-      }
+        }
+      })(data.items_visits);
     }
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
-    console.log(`[sync] visits done store=${storeId}`);
+    console.log(`[sync] visits done store=${storeId} items=${data?.items_visits?.length || 0}`);
   },
 };
 
@@ -534,6 +545,11 @@ const Scheduler = {
     const t0 = Date.now();
 
     try {
+      // If we've been getting 429s, pause before starting next job
+      if (RateLimiter.consecutive429 >= 3) {
+        await RateLimiter.pause(60000); // 1 minute hard pause
+      }
+
       const payload = JSON.parse(job.payload || '{}');
       await JOB_HANDLERS[job.type]?.(job.store_id, payload);
       db.prepare('UPDATE job_queue SET status=?, completed_at=unixepoch(), duration_ms=? WHERE id=?')
@@ -541,9 +557,12 @@ const Scheduler = {
       console.log(`[scheduler] ✓ ${job.type} store=${job.store_id} (${Date.now()-t0}ms)`);
     } catch (e) {
       const attempts = job.attempts + 1;
-      const retryDelays = [300000, 900000, 1800000]; // 5min, 15min, 30min
+      const is429 = e.message.includes('429') || e.message.includes('rate limit');
+      const retryDelays = is429
+        ? [600000, 1800000, 3600000]   // 429: 10min, 30min, 1h
+        : [300000, 900000, 1800000];   // other: 5min, 15min, 30min
       if (attempts < job.max_attempts) {
-        const delay = retryDelays[attempts - 1] || 1800000;
+        const delay = retryDelays[attempts - 1] || 3600000;
         db.prepare('UPDATE job_queue SET status=?, error=?, scheduled_at=unixepoch()+? WHERE id=?')
           .run('pending', e.message.slice(0, 500), Math.floor(delay/1000), job.id);
         console.log(`[scheduler] ✗ ${job.type} tentativa ${attempts}/${job.max_attempts} — retry em ${delay/60000}min`);
@@ -582,11 +601,11 @@ const Scheduler = {
     const stores = db.prepare('SELECT id FROM stores').all();
     if (!stores.length) return;
     stores.forEach((s, i) => {
-      // Stagger store syncs by 30 seconds each
-      const delay = i * 30000;
-      this.enqueue('sync_orders', s.id, 1, {}, delay);
-      this.enqueue('sync_questions', s.id, 2, {}, delay + 5000);
-      this.enqueue('sync_listings_batch', s.id, 4, { offset: 0 }, delay + 10000);
+      // Stagger: orders first, then questions 2min later, then listings 5min later
+      const base = i * 120000;
+      this.enqueue('sync_orders',        s.id, 1, {},           base);
+      this.enqueue('sync_questions',     s.id, 2, {},           base + 120000);
+      this.enqueue('sync_listings_batch',s.id, 4, { offset: 0 }, base + 300000);
     });
   },
 
