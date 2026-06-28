@@ -1166,3 +1166,99 @@ tr:hover td { background: #fafafa; }
   color: var(--text-2);
   white-space: nowrap;
 }
+
+/* ============================================================
+   PERFORMANCE PAGE
+   ============================================================ */
+.performance-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.perf-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 3px solid var(--yellow);
+  transition: box-shadow var(--transition), transform var(--transition);
+}
+.perf-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+
+.perf-card-icon  { font-size: 22px; margin-bottom: 4px; }
+.perf-card-value { font-size: 22px; font-weight: 800; color: var(--text); line-height: 1; }
+.perf-card-label { font-size: 11px; color: var(--text-2); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+/* Alert cards */
+.alert-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  border-left: 4px solid transparent;
+  background: var(--bg);
+  font-size: 13px;
+}
+.alert-card.danger  { border-left-color: var(--red);    background: #fef2f2; }
+.alert-card.warning { border-left-color: var(--orange); background: #fffbeb; }
+.alert-card.success { border-left-color: var(--green);  background: #f0fdf4; }
+
+/* Performance table */
+.perf-table th { font-size: 10px; padding: 8px 10px; white-space: nowrap; }
+.perf-table td { padding: 10px 10px; font-size: 13px; }
+.perf-table tr:hover td { background: #f9fafb; }
+
+/* Conversion color coding */
+.conv-high { color: var(--green); font-weight: 700; }
+.conv-mid  { color: var(--orange); font-weight: 600; }
+.conv-low  { color: var(--red); font-weight: 700; }
+
+/* Trend column */
+.trend-up   { color: var(--green); }
+.trend-down { color: var(--red); }
+
+/* Scatter chart */
+.scatter-container {
+  position: relative;
+  height: 280px;
+}
+
+/* Quadrant legend */
+.quadrant-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 11px;
+}
+.ql-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-weight: 600;
+}
+.ql-item::before { content: '●'; font-size: 14px; }
+.ql-green { background: #d1fae5; color: #065f46; }
+.ql-green::before { color: #10b981; }
+.ql-blue  { background: #dbeafe; color: #1e40af; }
+.ql-blue::before  { color: #3b82f6; }
+.ql-red   { background: #fee2e2; color: #991b1b; }
+.ql-red::before   { color: #ef4444; }
+.ql-gray  { background: #f3f4f6; color: #6b7280; }
+.ql-gray::before  { color: #9ca3af; }
+
+@media (max-width: 768px) {
+  .performance-summary { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 480px) {
+  .performance-summary { grid-template-columns: 1fr; }
+}

@@ -127,6 +127,14 @@ db.exec(`
     error      TEXT DEFAULT '',
     PRIMARY KEY (store_id, entity)
   );
+
+  CREATE TABLE IF NOT EXISTS item_visits (
+    item_id   TEXT NOT NULL,
+    store_id  TEXT NOT NULL,
+    date      TEXT NOT NULL,
+    visits    INTEGER DEFAULT 0,
+    PRIMARY KEY (item_id, store_id, date)
+  );
 `);
 
 setInterval(() => {
@@ -383,6 +391,38 @@ async function syncQuestions(storeId) {
   console.log(`[sync] questions done store=${storeId}`);
 }
 
+async function syncVisits(storeId) {
+  console.log(`[sync] visits store=${storeId}`);
+  const now = new Date();
+
+  // Sync last 31 days one day at a time to store daily granularity
+  for (let d = 0; d < 31; d++) {
+    const date = new Date(now - d * 86400000);
+    const dateStr = date.toISOString().split('T')[0];
+
+    const data = await mlFetch(
+      `/users/${storeId}/items/visits?date_from=${dateStr}&date_to=${dateStr}`,
+      {}, storeId
+    ).catch(() => null);
+
+    if (!data || !data.items_visits) continue;
+
+    const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id, store_id, date, visits) VALUES(?,?,?,?)');
+    db.transaction((items) => {
+      for (const item of items) {
+        if (item.id && item.total_visits > 0) {
+          insert.run(item.id, storeId, dateStr, item.total_visits);
+        }
+      }
+    })(data.items_visits);
+
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
+  console.log(`[sync] visits done store=${storeId}`);
+}
+
 async function syncAllStores() {
   const stores = db.prepare('SELECT * FROM stores').all();
   for (const store of stores) {
@@ -390,6 +430,8 @@ async function syncAllStores() {
       await syncOrders(store.id);
       await new Promise(r => setTimeout(r, 1000));
       await syncListings(store.id);
+      await new Promise(r => setTimeout(r, 1000));
+      await syncVisits(store.id);
       await new Promise(r => setTimeout(r, 1000));
       await syncQuestions(store.id);
     } catch(e) {
@@ -1120,6 +1162,181 @@ route('GET', '/api/metrics', (req, res, sess) => {
     cacheSet(cKey, result, 60);
     ok(res, result);
   } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Performance ────────────────────────────────────────────
+route('GET', '/api/performance', async (req, res, sess) => {
+  const p = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const period = p.get('period') || '7d';
+  const sort = p.get('sort') || 'visits';
+  const order = p.get('order') || 'desc';
+  const search = (p.get('search') || '').toLowerCase();
+
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+
+  const periodDays = { yesterday: 1, '3d': 3, '7d': 7, '15d': 15, '30d': 30 };
+  const days = periodDays[period] || 7;
+
+  const fromDate = new Date(now - days * 86400000).toISOString().split('T')[0];
+  const prevFromDate = new Date(now - days * 2 * 86400000).toISOString().split('T')[0];
+
+  let dateFrom = fromDate;
+  let dateTo = today;
+  if (period === 'yesterday') {
+    const yesterday = new Date(now - 86400000).toISOString().split('T')[0];
+    dateFrom = yesterday;
+    dateTo = yesterday;
+  }
+
+  try {
+    const listings = db.prepare('SELECT * FROM listings WHERE store_id=?').all(storeId);
+
+    const visitsRows = db.prepare(`
+      SELECT item_id, SUM(visits) as total_visits
+      FROM item_visits
+      WHERE store_id=? AND date >= ? AND date <= ?
+      GROUP BY item_id
+    `).all(storeId, dateFrom, dateTo);
+    const visitsMap = {};
+    visitsRows.forEach(r => { visitsMap[r.item_id] = r.total_visits; });
+
+    const prevVisitsRows = db.prepare(`
+      SELECT item_id, SUM(visits) as total_visits
+      FROM item_visits
+      WHERE store_id=? AND date >= ? AND date < ?
+      GROUP BY item_id
+    `).all(storeId, prevFromDate, fromDate);
+    const prevVisitsMap = {};
+    prevVisitsRows.forEach(r => { prevVisitsMap[r.item_id] = r.total_visits; });
+
+    const salesRows = db.prepare(`
+      SELECT oi.item_id, COUNT(DISTINCT oi.order_id) as sales, SUM(oi.quantity) as units, SUM(oi.quantity * oi.unit_price) as revenue
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE oi.store_id=? AND o.date_created >= ? AND o.date_created <= ? AND o.status='paid'
+      GROUP BY oi.item_id
+    `).all(storeId, dateFrom + 'T00:00:00', dateTo + 'T23:59:59');
+    const salesMap = {};
+    salesRows.forEach(r => { salesMap[r.item_id] = { sales: r.sales, units: r.units, revenue: r.revenue }; });
+
+    const prevSalesRows = db.prepare(`
+      SELECT oi.item_id, COUNT(DISTINCT oi.order_id) as sales, SUM(oi.quantity * oi.unit_price) as revenue
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE oi.store_id=? AND o.date_created >= ? AND o.date_created < ? AND o.status='paid'
+      GROUP BY oi.item_id
+    `).all(storeId, prevFromDate + 'T00:00:00', fromDate + 'T00:00:00');
+    const prevSalesMap = {};
+    prevSalesRows.forEach(r => { prevSalesMap[r.item_id] = { sales: r.sales, revenue: r.revenue }; });
+
+    let items = listings.map(l => {
+      const v = visitsMap[l.id] || 0;
+      const s = salesMap[l.id] || { sales: 0, units: 0, revenue: 0 };
+      const pv = prevVisitsMap[l.id] || 0;
+      const ps = prevSalesMap[l.id] || { sales: 0, revenue: 0 };
+
+      const conversion = v > 0 ? (s.units / v) * 100 : 0;
+      const prevConversion = pv > 0 ? (ps.sales / pv) * 100 : 0;
+      const avgTicket = s.sales > 0 ? s.revenue / s.sales : 0;
+      const revenuePerVisit = v > 0 ? s.revenue / v : 0;
+      const visitsPerSale = s.sales > 0 ? v / s.sales : 0;
+
+      const visitGrowth = pv > 0 ? ((v - pv) / pv) * 100 : (v > 0 ? 100 : 0);
+      const saleGrowth = ps.sales > 0 ? ((s.sales - ps.sales) / ps.sales) * 100 : (s.sales > 0 ? 100 : 0);
+      const revenueGrowth = ps.revenue > 0 ? ((s.revenue - ps.revenue) / ps.revenue) * 100 : (s.revenue > 0 ? 100 : 0);
+
+      return {
+        id: l.id,
+        title: l.title,
+        thumbnail: l.thumbnail,
+        status: l.status,
+        category_id: l.category_id,
+        listing_type_id: l.listing_type_id,
+        available_quantity: l.available_quantity,
+        sold_quantity: l.sold_quantity,
+        price: l.price,
+        visits: v,
+        sales: s.sales,
+        units: s.units,
+        revenue: s.revenue,
+        conversion,
+        avgTicket,
+        revenuePerVisit,
+        visitsPerSale,
+        visitGrowth,
+        saleGrowth,
+        revenueGrowth,
+        prevVisits: pv,
+        prevSales: ps.sales,
+        prevRevenue: ps.revenue,
+        prevConversion,
+      };
+    });
+
+    if (search) {
+      items = items.filter(i =>
+        i.title.toLowerCase().includes(search) ||
+        i.id.toLowerCase().includes(search)
+      );
+    }
+
+    const withVisits = items.filter(i => i.visits > 0);
+    const avgConversion = withVisits.length > 0
+      ? withVisits.reduce((s, i) => s + i.conversion, 0) / withVisits.length
+      : 0;
+
+    const sortFns = {
+      visits:     (a, b) => b.visits - a.visits,
+      sales:      (a, b) => b.sales - a.sales,
+      revenue:    (a, b) => b.revenue - a.revenue,
+      conversion: (a, b) => b.conversion - a.conversion,
+      growth:     (a, b) => b.visitGrowth - a.visitGrowth,
+    };
+    const sortFn = sortFns[sort] || sortFns.visits;
+    items.sort(order === 'asc' ? (a, b) => -sortFn(a, b) : sortFn);
+
+    const totalVisits = items.reduce((s, i) => s + i.visits, 0);
+    const totalSales = items.reduce((s, i) => s + i.sales, 0);
+    const totalRevenue = items.reduce((s, i) => s + i.revenue, 0);
+    const avgConversionFinal = totalVisits > 0 ? (totalSales / totalVisits) * 100 : 0;
+    const avgTicketFinal = totalSales > 0 ? totalRevenue / totalSales : 0;
+    const revenuePerVisitFinal = totalVisits > 0 ? totalRevenue / totalVisits : 0;
+
+    const alerts = [];
+    items.forEach(item => {
+      if (item.visits > 100 && item.sales === 0)
+        alerts.push({ type: 'danger', item_id: item.id, title: item.title, msg: `Alto tráfego (${item.visits} visitas) mas nenhuma venda` });
+      else if (item.visits > 50 && item.conversion < avgConversion * 0.5 && avgConversion > 0)
+        alerts.push({ type: 'warning', item_id: item.id, title: item.title, msg: `Conversão muito abaixo da média (${item.conversion.toFixed(1)}% vs ${avgConversion.toFixed(1)}%)` });
+      if (item.visitGrowth < -30 && item.prevVisits > 20)
+        alerts.push({ type: 'danger', item_id: item.id, title: item.title, msg: `Queda de ${Math.abs(item.visitGrowth).toFixed(0)}% nas visitas` });
+      if (item.saleGrowth < -20 && item.prevSales > 5)
+        alerts.push({ type: 'warning', item_id: item.id, title: item.title, msg: `Queda de ${Math.abs(item.saleGrowth).toFixed(0)}% nas vendas` });
+      if (item.visits < 10 && item.conversion > avgConversion * 2 && item.sales > 0)
+        alerts.push({ type: 'success', item_id: item.id, title: item.title, msg: `Excelente conversão (${item.conversion.toFixed(1)}%) com baixo tráfego — potencial para Ads` });
+      if (item.visitGrowth > 50 && item.saleGrowth < -10)
+        alerts.push({ type: 'warning', item_id: item.id, title: item.title, msg: `Tráfego cresceu mas vendas caíram — revisar preço/título/imagens` });
+      if (item.conversion > avgConversion * 1.5 && item.sales > 3)
+        alerts.push({ type: 'success', item_id: item.id, title: item.title, msg: `Conversão acima da média do catálogo` });
+      if (item.available_quantity === 0 && item.visits > 30)
+        alerts.push({ type: 'danger', item_id: item.id, title: item.title, msg: `Sem estoque mas recebendo visitas` });
+    });
+
+    const itemsWithAvg = items.map(i => ({ ...i, avgConversion }));
+
+    ok(res, {
+      items: itemsWithAvg,
+      summary: { totalVisits, totalSales, totalRevenue, avgConversion: avgConversionFinal, avgTicket: avgTicketFinal, revenuePerVisit: revenuePerVisitFinal, totalItems: items.length },
+      alerts: alerts.slice(0, 20),
+      period,
+      days,
+    });
+  } catch (e) {
+    console.error('Performance error:', e.message);
     apiErr(res, 500, e.message);
   }
 });

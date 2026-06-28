@@ -103,6 +103,7 @@ const PAGES = {
   hourly:           renderHourly,
   weekday:          renderWeekday,
   'products-analysis': renderProducts,
+  performance:      renderPerformance,
 };
 
 const PAGE_TITLES = {
@@ -116,6 +117,7 @@ const PAGE_TITLES = {
   hourly:           'Horários de Venda',
   weekday:          'Dias da Semana',
   'products-analysis': 'Ranking de Produtos',
+  'performance':    'Performance de Anúncios',
 };
 
 function navigate(page) {
@@ -1525,6 +1527,329 @@ async function renderProducts() {
     setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`);
   }
 }
+
+// ============================================================
+// PAGE: PERFORMANCE DE ANÚNCIOS
+// ============================================================
+let perfData = null;
+let perfSortCol = null;
+let perfSortDir = 'desc';
+
+async function renderPerformance() {
+  State.performancePeriod = State.performancePeriod || '7d';
+  State.performanceSort   = State.performanceSort   || 'visits';
+
+  loading();
+  try {
+    const period = State.performancePeriod;
+    const search = State.performanceSearch || '';
+    const url = `/api/performance?storeId=${State.currentStore}&period=${period}&sort=${State.performanceSort}&order=${perfSortDir}&search=${encodeURIComponent(search)}`;
+    const data = await API.get(url);
+    perfData = data;
+
+    const { items, summary, alerts } = data;
+    const periodLabels = { yesterday: 'Ontem', '3d': '3 dias', '7d': '7 dias', '15d': '15 dias', '30d': '30 dias' };
+    const periodKeys   = ['yesterday', '3d', '7d', '15d', '30d'];
+
+    const noVisitsData = summary.totalVisits === 0;
+
+    const html = `
+      <div class="page-header">
+        <div>
+          <div class="page-title">Performance de Anúncios</div>
+          <div class="page-subtitle">Visitas, conversão e receita por anúncio</div>
+        </div>
+      </div>
+
+      <div class="period-selector" style="margin-bottom:20px">
+        ${periodKeys.map(k => `<button class="period-btn ${k === period ? 'active' : ''}" onclick="setPerfPeriod('${k}')">${periodLabels[k]}</button>`).join('')}
+      </div>
+
+      <div class="performance-summary">
+        ${perfSummaryCard('👁️', fmt.num(summary.totalVisits), 'Total Visitas')}
+        ${perfSummaryCard('🛒', fmt.num(summary.totalSales), 'Total Vendas')}
+        ${perfSummaryCard('📊', fmt.pct(summary.avgConversion), 'Conversão Média')}
+        ${perfSummaryCard('💰', fmt.brl(summary.totalRevenue), 'Receita Total')}
+        ${perfSummaryCard('🎫', fmt.brl(summary.avgTicket), 'Ticket Médio')}
+        ${perfSummaryCard('💡', fmt.brl(summary.revenuePerVisit), 'Receita/Visita')}
+        ${perfSummaryCard('📦', fmt.num(summary.totalItems), 'Anúncios')}
+      </div>
+
+      ${alerts.length ? `
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between" onclick="toggleAlerts()">
+          ⚠️ Alertas Inteligentes <span style="font-size:12px;background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:12px">${alerts.length}</span>
+          <span id="alertToggleIcon" style="font-size:12px;color:var(--text-3)">▼</span>
+        </div>
+        <div id="alertsBody">
+          ${alerts.map(a => `
+            <div class="alert-card ${a.type}">
+              <span>${a.type === 'danger' ? '🔴' : a.type === 'warning' ? '🟡' : '🟢'}</span>
+              <div>
+                <div style="font-size:13px;font-weight:600;color:var(--text)">${a.title}</div>
+                <div style="font-size:12px;color:var(--text-2);margin-top:2px">${a.msg}</div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>` : ''}
+
+      <div class="analytics-tabs" style="margin-bottom:4px">
+        ${[
+          { key: 'visits',      label: 'Mais Visitados',    sort: 'visits',     order: 'desc' },
+          { key: 'visits-asc',  label: 'Menos Visitados',   sort: 'visits',     order: 'asc'  },
+          { key: 'conv-desc',   label: 'Maior Conversão',   sort: 'conversion', order: 'desc' },
+          { key: 'conv-asc',    label: 'Menor Conversão',   sort: 'conversion', order: 'asc'  },
+          { key: 'rev-desc',    label: 'Maior Receita',     sort: 'revenue',    order: 'desc' },
+          { key: 'rev-asc',     label: 'Menor Receita',     sort: 'revenue',    order: 'asc'  },
+          { key: 'sales-desc',  label: 'Mais Vendidos',     sort: 'sales',      order: 'desc' },
+          { key: 'growth-desc', label: 'Crescimento',       sort: 'growth',     order: 'desc' },
+          { key: 'growth-asc',  label: 'Queda',             sort: 'growth',     order: 'asc'  },
+        ].map(t => `<button class="analytics-tab" data-sort="${t.sort}" data-order="${t.order}" onclick="setPerfRanking('${t.sort}','${t.order}')">${t.label}</button>`).join('')}
+      </div>
+
+      ${noVisitsData ? `<div class="card" style="margin-bottom:16px"><div class="empty-state" style="padding:40px"><div class="empty-state-icon">⏳</div><h3>Aguardando sincronização dos dados...</h3><p>Clique em "⟳ Sync" para sincronizar visitas do Mercado Livre.</p></div></div>` : `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div class="card">
+          <div class="card-title">🔵 Mapa de Quadrantes (Visitas × Conversão)</div>
+          <div class="scatter-container">
+            <canvas id="scatterChart"></canvas>
+          </div>
+          <div class="quadrant-legend">
+            <span class="ql-item ql-green">Q1: Alta visita + Alta conv.</span>
+            <span class="ql-item ql-blue">Q2: Baixa visita + Alta conv.</span>
+            <span class="ql-item ql-red">Q3: Alta visita + Baixa conv.</span>
+            <span class="ql-item ql-gray">Q4: Baixa visita + Baixa conv.</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">📊 Top 20 por Visitas</div>
+          <div class="chart-container">
+            <canvas id="visitsBarChart"></canvas>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">🎯 Top 20 por Conversão</div>
+        <div class="chart-container">
+          <canvas id="convBarChart"></canvas>
+        </div>
+      </div>
+      `}
+
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <div class="card-title" style="margin-bottom:0">📋 Todos os Anúncios</div>
+          <div class="search-wrap" style="max-width:320px">
+            <span class="search-icon">🔍</span>
+            <input type="text" class="search-input" id="perfSearch" placeholder="Buscar por título ou ID..." value="${State.performanceSearch || ''}" oninput="setPerfSearch(this.value)">
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="perf-table">
+            <thead>
+              <tr>
+                <th style="width:50px"></th>
+                <th onclick="sortPerfTable('title')" style="cursor:pointer">Título ${perfSortCol==='title'?'↕':''}</th>
+                <th class="text-right" onclick="sortPerfTable('visits')" style="cursor:pointer">Visitas ${perfSortCol==='visits'?'↕':''}</th>
+                <th class="text-right" onclick="sortPerfTable('sales')" style="cursor:pointer">Vendas ${perfSortCol==='sales'?'↕':''}</th>
+                <th class="text-right" onclick="sortPerfTable('conversion')" style="cursor:pointer">Conversão ${perfSortCol==='conversion'?'↕':''}</th>
+                <th class="text-right" onclick="sortPerfTable('revenue')" style="cursor:pointer">Receita ${perfSortCol==='revenue'?'↕':''}</th>
+                <th class="text-right" onclick="sortPerfTable('avgTicket')" style="cursor:pointer">Ticket Médio ${perfSortCol==='avgTicket'?'↕':''}</th>
+                <th class="text-right">R$/Visita</th>
+                <th class="text-right">Vis./Venda</th>
+                <th class="text-right">Estoque</th>
+                <th>Status</th>
+                <th class="text-right" onclick="sortPerfTable('visitGrowth')" style="cursor:pointer">Tendência ${perfSortCol==='visitGrowth'?'↕':''}</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${items.length ? items.map(item => {
+                const avgC = item.avgConversion;
+                let convCls = '';
+                if (item.visits > 10) {
+                  if (item.conversion >= avgC * 1.2) convCls = 'conv-high';
+                  else if (item.conversion >= avgC * 0.8) convCls = 'conv-mid';
+                  else convCls = 'conv-low';
+                }
+                const trendPct = item.visitGrowth;
+                const trendCls = trendPct > 0 ? 'trend-up' : trendPct < 0 ? 'trend-down' : '';
+                const trendArrow = trendPct > 0 ? '↑' : trendPct < 0 ? '↓' : '→';
+                return `
+                  <tr>
+                    <td>${item.thumbnail ? `<img src="${item.thumbnail}" style="width:40px;height:40px;object-fit:contain;border-radius:6px;border:1px solid var(--border)">` : '<div style="width:40px;height:40px;background:var(--bg);border-radius:6px;border:1px solid var(--border);display:flex;align-items:center;justify-content:center">📦</div>'}</td>
+                    <td class="truncate" style="max-width:220px" title="${item.title}"><div style="font-size:13px;font-weight:600">${item.title}</div><div style="font-size:11px;color:var(--text-3)">${item.id}</div></td>
+                    <td class="text-right fw-bold">${fmt.num(item.visits)}</td>
+                    <td class="text-right">${fmt.num(item.sales)}</td>
+                    <td class="text-right"><span class="${convCls}">${fmt.pct(item.conversion)}</span></td>
+                    <td class="text-right fw-bold">${fmt.brl(item.revenue)}</td>
+                    <td class="text-right">${fmt.brl(item.avgTicket)}</td>
+                    <td class="text-right td-light">${fmt.brl(item.revenuePerVisit)}</td>
+                    <td class="text-right td-light">${item.visitsPerSale > 0 ? fmt.num(Math.round(item.visitsPerSale)) : '-'}</td>
+                    <td class="text-right">${fmt.num(item.available_quantity)}</td>
+                    <td>${badge(STATUS_LISTING, item.status)}</td>
+                    <td class="text-right"><span class="${trendCls}" style="font-weight:700;font-size:13px">${trendArrow} ${Math.abs(trendPct).toFixed(0)}%</span></td>
+                  </tr>
+                `;
+              }).join('') : '<tr><td colspan="12" class="text-center td-light" style="padding:32px">Nenhum anúncio encontrado.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    setContent(html);
+
+    if (!noVisitsData) {
+      // Scatter chart
+      const scatterItems = items.filter(i => i.visits > 0 || i.sales > 0);
+      const medVisits = median(scatterItems.map(i => i.visits));
+      const medConv   = median(scatterItems.map(i => i.conversion));
+
+      const q1 = [], q2 = [], q3 = [], q4 = [];
+      scatterItems.forEach(i => {
+        const pt = { x: i.visits, y: parseFloat(i.conversion.toFixed(2)), label: i.title };
+        if (i.visits >= medVisits && i.conversion >= medConv) q1.push(pt);
+        else if (i.visits < medVisits && i.conversion >= medConv) q2.push(pt);
+        else if (i.visits >= medVisits && i.conversion < medConv) q3.push(pt);
+        else q4.push(pt);
+      });
+
+      const sCtx = document.getElementById('scatterChart').getContext('2d');
+      State.charts.scatter = new Chart(sCtx, {
+        type: 'scatter',
+        data: {
+          datasets: [
+            { label: 'Q1: Alta vis.+conv.', data: q1, backgroundColor: 'rgba(16,185,129,0.7)', pointRadius: 6, pointHoverRadius: 8 },
+            { label: 'Q2: Baixa vis.+Alta conv.', data: q2, backgroundColor: 'rgba(59,130,246,0.7)', pointRadius: 6, pointHoverRadius: 8 },
+            { label: 'Q3: Alta vis.+Baixa conv.', data: q3, backgroundColor: 'rgba(239,68,68,0.7)', pointRadius: 6, pointHoverRadius: 8 },
+            { label: 'Q4: Baixa vis.+conv.', data: q4, backgroundColor: 'rgba(156,163,175,0.5)', pointRadius: 5, pointHoverRadius: 7 },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: true, position: 'top', labels: { font: { size: 11 }, boxWidth: 10 } },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  const d = ctx.raw;
+                  return `${d.label ? d.label.slice(0,40) : ''} | Vis: ${d.x} | Conv: ${d.y}%`;
+                },
+              },
+            },
+            annotation: undefined,
+          },
+          scales: {
+            x: { title: { display: true, text: 'Visitas' }, grid: { color: '#f0f2f8' } },
+            y: { title: { display: true, text: 'Conversão (%)' }, grid: { color: '#f0f2f8' }, beginAtZero: true },
+          },
+        },
+      });
+
+      // Visits bar chart
+      const top20v = [...items].sort((a,b) => b.visits - a.visits).slice(0, 20);
+      const vCtx = document.getElementById('visitsBarChart').getContext('2d');
+      State.charts.visitsBar = new Chart(vCtx, {
+        type: 'bar',
+        data: {
+          labels: top20v.map(i => i.title.slice(0, 20)),
+          datasets: [{ label: 'Visitas', data: top20v.map(i => i.visits), backgroundColor: 'rgba(59,130,246,0.7)', borderRadius: 4 }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { color: '#f0f2f8' } },
+            y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+          },
+        },
+      });
+
+      // Conversion bar chart
+      const top20c = [...items].filter(i => i.visits > 5).sort((a,b) => b.conversion - a.conversion).slice(0, 20);
+      const cCtx = document.getElementById('convBarChart').getContext('2d');
+      State.charts.convBar = new Chart(cCtx, {
+        type: 'bar',
+        data: {
+          labels: top20c.map(i => i.title.slice(0, 20)),
+          datasets: [{ label: 'Conversão (%)', data: top20c.map(i => parseFloat(i.conversion.toFixed(2))), backgroundColor: 'rgba(16,185,129,0.7)', borderRadius: 4 }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          indexAxis: 'y',
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { color: '#f0f2f8' }, ticks: { callback: v => v + '%' } },
+            y: { grid: { display: false }, ticks: { font: { size: 10 } } },
+          },
+        },
+      });
+    }
+
+  } catch (e) {
+    setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro ao carregar performance</h3><p>${e.message}</p></div>`);
+  }
+}
+
+function median(arr) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function perfSummaryCard(icon, value, label) {
+  return `
+    <div class="perf-card">
+      <div class="perf-card-icon">${icon}</div>
+      <div class="perf-card-value">${value}</div>
+      <div class="perf-card-label">${label}</div>
+    </div>
+  `;
+}
+
+window.setPerfPeriod = (period) => {
+  State.performancePeriod = period;
+  renderPerformance();
+};
+
+window.setPerfSearch = (val) => {
+  State.performanceSearch = val;
+  clearTimeout(window._perfSearchTimer);
+  window._perfSearchTimer = setTimeout(() => renderPerformance(), 400);
+};
+
+window.setPerfRanking = (sort, order) => {
+  State.performanceSort = sort;
+  perfSortDir = order;
+  renderPerformance();
+};
+
+window.sortPerfTable = (col) => {
+  if (perfSortCol === col) {
+    perfSortDir = perfSortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    perfSortCol = col;
+    perfSortDir = 'desc';
+  }
+  State.performanceSort = col === 'title' ? 'visits' : col;
+  renderPerformance();
+};
+
+window.toggleAlerts = () => {
+  const body = document.getElementById('alertsBody');
+  const icon = document.getElementById('alertToggleIcon');
+  if (!body) return;
+  const hidden = body.style.display === 'none';
+  body.style.display = hidden ? '' : 'none';
+  if (icon) icon.textContent = hidden ? '▼' : '▶';
+};
 
 // ============================================================
 // BOOT
