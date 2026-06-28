@@ -2114,9 +2114,14 @@ route('GET', '/api/analytics/products', (req, res, sess) => {
 
     if (type === 'ranking') {
       const products = db.prepare(`
-        SELECT oi.item_id, oi.item_title, COUNT(DISTINCT oi.order_id) as orders, SUM(oi.quantity) as units, SUM(oi.quantity * oi.unit_price) as revenue
+        SELECT oi.item_id, oi.item_title,
+               COUNT(DISTINCT oi.order_id) as orders,
+               SUM(oi.quantity) as units,
+               SUM(oi.quantity * oi.unit_price) as revenue,
+               l.available_quantity
         FROM order_items oi
         JOIN orders o ON o.id = oi.order_id
+        LEFT JOIN listings l ON l.id = oi.item_id AND l.store_id = oi.store_id
         WHERE oi.store_id=? AND o.date_created>=? AND o.status='paid'
         GROUP BY oi.item_id
         ORDER BY revenue DESC
@@ -2124,7 +2129,20 @@ route('GET', '/api/analytics/products', (req, res, sess) => {
       `).all(storeId, fromDate);
 
       const result = {
-        products: products.map(p => ({ id: p.item_id, title: p.item_title || p.item_id, orders: p.orders, units: p.units, revenue: p.revenue, avgTicket: p.orders > 0 ? p.revenue / p.orders : 0 })),
+        products: products.map(p => {
+          const stock       = p.available_quantity ?? 0;
+          const dailyAvg    = days > 0 ? p.units / days : 0;
+          const targetStock = dailyAvg * days;
+          const replenish   = Math.max(0, Math.ceil(targetStock - stock));
+          const target60    = dailyAvg * 60;
+          const replenish60 = Math.max(0, Math.ceil(target60 - stock));
+          return {
+            id: p.item_id, title: p.item_title || p.item_id,
+            orders: p.orders, units: p.units, revenue: p.revenue,
+            avgTicket: p.orders > 0 ? p.revenue / p.orders : 0,
+            stock, dailyAvg, replenish, replenish60,
+          };
+        }),
         days, type, dataGap, maxDate,
       };
       cacheSet(cKey, result, 60);

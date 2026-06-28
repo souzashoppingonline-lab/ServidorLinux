@@ -1524,22 +1524,48 @@ async function renderProducts() {
 
     let tableHtml = '';
     if (productTab === 'ranking') {
+      function replenishBadge(qty) {
+        if (qty <= 0) return `<span style="color:#16a34a;font-size:11px;font-weight:600">✔ Abastecido</span>`;
+        return `<span style="color:#dc2626;font-weight:700">${qty} un</span>`;
+      }
+      function rep60Badge(qty) {
+        if (qty <= 0) return `<span style="color:#16a34a;font-size:11px;font-weight:600">✔ 60d OK</span>`;
+        return `<span style="color:#d97706;font-weight:700">${qty} un</span>`;
+      }
       tableHtml = `
-        <table>
-          <thead><tr><th>#</th><th>Produto</th><th class="text-right">Pedidos</th><th class="text-right">Unidades</th><th class="text-right">Receita</th><th class="text-right">Ticket Médio</th></tr></thead>
+        <div style="overflow-x:auto">
+        <table style="min-width:900px">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Produto</th>
+              <th class="text-right" title="Unidades vendidas no período">Vendas</th>
+              <th class="text-right" title="Média de unidades vendidas por dia">Méd/dia</th>
+              <th class="text-right" title="Receita total no período">Receita</th>
+              <th class="text-right" title="Estoque disponível atual">Estoque</th>
+              <th class="text-right" title="Unidades necessárias para cobrir o período analisado">Repor (${productDays}d)</th>
+              <th class="text-right" title="Unidades necessárias para garantir cobertura de 60 dias">Repor (60d)</th>
+            </tr>
+          </thead>
           <tbody>
             ${products.length ? products.map((p, i) => `
               <tr>
-                <td style="color:var(--text-3);font-weight:600">${i+1}</td>
-                <td class="truncate" style="max-width:260px" title="${p.title}">${p.title}</td>
-                <td class="text-right">${p.orders}</td>
-                <td class="text-right">${p.units}</td>
+                <td style="color:var(--text-3);font-weight:600;width:32px">${i+1}</td>
+                <td style="max-width:220px">
+                  <div class="truncate" title="${p.title}">${p.title}</div>
+                  <div style="font-size:11px;color:var(--text-3);font-family:monospace">${p.id}</div>
+                </td>
+                <td class="text-right">${p.units} un</td>
+                <td class="text-right">${p.dailyAvg > 0 ? p.dailyAvg.toFixed(2) : '—'}</td>
                 <td class="text-right fw-bold">${fmt.brl(p.revenue)}</td>
-                <td class="text-right">${fmt.brl(p.avgTicket)}</td>
+                <td class="text-right">${p.stock ?? '—'}</td>
+                <td class="text-right">${replenishBadge(p.replenish)}</td>
+                <td class="text-right">${rep60Badge(p.replenish60)}</td>
               </tr>
-            `).join('') : '<tr><td colspan="6" class="text-center td-light" style="padding:32px">Nenhum produto encontrado.</td></tr>'}
+            `).join('') : '<tr><td colspan="8" class="text-center td-light" style="padding:32px">Nenhum produto encontrado.</td></tr>'}
           </tbody>
         </table>
+        </div>
       `;
     } else if (productTab === 'trending' || productTab === 'declining') {
       tableHtml = `
