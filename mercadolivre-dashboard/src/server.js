@@ -985,20 +985,35 @@ const JOB_HANDLERS = {
       const dateTo   = yesterday.toISOString().split('T')[0];
 
       await new Promise(r => setTimeout(r, 1000));
-      const reportData = await mlFetch(
-        `/advertising/advertisers/${advertiserId}/reports/products?date_from=${dateFrom}&date_to=${dateTo}&limit=100`,
+
+      // Try campaign-level summary first (no product_id required)
+      let reportData = await mlFetch(
+        `/advertising/advertisers/${advertiserId}/reports/campaigns?date_from=${dateFrom}&date_to=${dateTo}&limit=100`,
         {}, storeId
       ).catch(e => {
-        if (e.message.includes('403') || e.message.includes('404')) return null;
-        throw e;
+        console.log(`[sync] ads_metrics campaigns report error: ${e.message.slice(0,200)}`);
+        return null;
       });
 
+      // Fallback: try product-level report without product_id filter
       if (!reportData) {
-        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', '');
+        reportData = await mlFetch(
+          `/advertising/advertisers/${advertiserId}/reports?date_from=${dateFrom}&date_to=${dateTo}&limit=100`,
+          {}, storeId
+        ).catch(e => {
+          console.log(`[sync] ads_metrics fallback report error: ${e.message.slice(0,200)}`);
+          return null;
+        });
+      }
+
+      if (!reportData) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', 'no report data from ML API');
+        console.log(`[sync] ads_metrics store=${storeId} — sem dados de relatório da API`);
         return;
       }
 
-      const rows = reportData?.results || reportData?.data || (Array.isArray(reportData) ? reportData : []);
+      const rows = reportData?.results || reportData?.data || reportData?.summary || (Array.isArray(reportData) ? reportData : []);
+      console.log(`[sync] ads_metrics rows=${rows.length} sample=${JSON.stringify(rows[0]||{}).slice(0,300)}`);
 
       db.transaction((items) => {
         for (const row of items) {
@@ -1858,6 +1873,21 @@ route('GET', '/api/debug/visits', (req, res) => {
   ok(res, { count, sample, byDate, syncLog, activeListings });
 }, true);
 
+route('GET', '/api/debug/ads', async (req, res) => {
+  const storeId = qp(req).get('storeId') || '1662123376';
+  try {
+    const camps  = db.prepare('SELECT COUNT(*) as n FROM ads_campaigns WHERE store_id=?').get(storeId);
+    const metr   = db.prepare('SELECT COUNT(*) as n FROM ads_daily_metrics WHERE store_id=?').get(storeId);
+    const syncC  = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(storeId);
+    const syncM  = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
+    // Test advertiser endpoint live
+    const advRaw = await mlFetch(`/advertising/advertisers?user_id=${storeId}`, {}, storeId).catch(e => ({ _error: e.message }));
+    ok(res, { campaigns: camps, metrics: metr, syncCampaigns: syncC, syncMetrics: syncM, advertiserRaw: advRaw });
+  } catch (e) {
+    ok(res, { error: e.message });
+  }
+}, true);
+
 route('GET', '/api/debug/visits-live', async (req, res) => {
   const storeId = qp(req).get('storeId');
   if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
@@ -2610,7 +2640,8 @@ route('GET', '/api/ads/dashboard', (req, res, sess) => {
       roas: r.spend > 0 ? r.attributed_revenue / r.spend : 0,
     }));
 
-    const syncLog = db.prepare("SELECT last_sync,status FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
+    const syncLog  = db.prepare("SELECT last_sync,status,error FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
+    const syncCamp = db.prepare("SELECT last_sync,status,error FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(storeId);
 
     ok(res, { kpis, by_campaign, by_day, syncLog: syncLog || null, period, dateFrom, dateTo });
   } catch (e) {
