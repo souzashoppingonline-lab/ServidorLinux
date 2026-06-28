@@ -1785,6 +1785,17 @@ route('POST', '/api/promotions/sync', (req, res, sess) => {
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
 });
 
+route('GET', '/api/debug/orders', (req, res) => {
+  const storeId = qp(req).get('storeId') || '1662123376';
+  const total        = db.prepare("SELECT COUNT(*) as n FROM orders WHERE store_id=?").get(storeId);
+  const byStatus     = db.prepare("SELECT status, COUNT(*) as n FROM orders WHERE store_id=? GROUP BY status ORDER BY n DESC").all(storeId);
+  const dateRange    = db.prepare("SELECT MIN(date_created) as min_d, MAX(date_created) as max_d FROM orders WHERE store_id=?").get(storeId);
+  const last30paid   = db.prepare("SELECT COUNT(*) as n, COALESCE(SUM(total_amount),0) as rev FROM orders WHERE store_id=? AND status='paid' AND date_created >= ?").get(storeId, new Date(Date.now()-30*86400000).toISOString());
+  const sampleOrders = db.prepare("SELECT id, status, total_amount, date_created FROM orders WHERE store_id=? ORDER BY date_created DESC LIMIT 5").all(storeId);
+  const orderItems   = db.prepare("SELECT COUNT(*) as n FROM order_items WHERE store_id=?").get(storeId);
+  ok(res, { total, byStatus, dateRange, last30paid, sampleOrders, orderItems });
+}, true);
+
 route('GET', '/api/debug/item', (req, res) => {
   const p       = qp(req);
   const itemId  = p.get('itemId');
