@@ -1269,7 +1269,7 @@ async function renderHourly() {
   loading();
   try {
     const data = await API.get(`/api/analytics/hourly?storeId=${State.currentStore}&days=${hourlyDays}`);
-    const { byHour, bestHours, totalOrders, totalRevenue, days } = data;
+    const { byHour, bestHours, totalOrders, totalRevenue, days, dataGap, maxDate } = data;
 
     const maxOrders = Math.max(...byHour.map(h => h.orders), 1);
 
@@ -1288,7 +1288,7 @@ async function renderHourly() {
       <div class="page-header">
         <div>
           <div class="page-title">Horários de Venda</div>
-          <div class="page-subtitle">Distribuição de pedidos por hora do dia (Brasil UTC-3)</div>
+          <div class="page-subtitle">Distribuição de pedidos por hora do dia (Brasil UTC-3)${dataGap ? ` — <span style="color:#d97706">⚠ dados de ${maxDate?.split('T')[0]} (pedidos desatualizados — faça Sync)</span>` : ''}</div>
         </div>
       </div>
 
@@ -1402,14 +1402,14 @@ async function renderWeekday() {
   loading();
   try {
     const data = await API.get(`/api/analytics/weekday?storeId=${State.currentStore}&days=${weekdayDays}`);
-    const { byDay, bestDay, avgOrdersPerDay, days } = data;
+    const { byDay, bestDay, avgOrdersPerDay, days, dataGap: wdGap, maxDate: wdMax } = data;
     const periodOptions = [7, 15, 30, 60];
 
     const html = `
       <div class="page-header">
         <div>
           <div class="page-title">Dias da Semana</div>
-          <div class="page-subtitle">Análise de vendas por dia da semana</div>
+          <div class="page-subtitle">Análise de vendas por dia da semana${wdGap ? ` — <span style="color:#d97706">⚠ dados de ${wdMax?.split('T')[0]} (pedidos desatualizados — faça Sync)</span>` : ''}</div>
         </div>
       </div>
 

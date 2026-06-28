@@ -2007,6 +2007,18 @@ route('POST', '/api/messages', async (req, res, sess) => {
 });
 
 // ── Analytics: hourly ──────────────────────────────────────
+// Returns fromDate adjusted for data gap: if all orders are older than the window, shift back
+function analyticsFromDate(storeId, days) {
+  const maxRow = db.prepare("SELECT MAX(date_created) as max_d FROM orders WHERE store_id=? AND status='paid'").get(storeId);
+  const now = Date.now();
+  const windowStart = now - days * 86400000;
+  if (maxRow?.max_d && new Date(maxRow.max_d).getTime() < windowStart) {
+    const maxD = new Date(maxRow.max_d).getTime();
+    return { fromDate: new Date(maxD - days * 86400000).toISOString(), dataGap: true, maxDate: maxRow.max_d };
+  }
+  return { fromDate: new Date(windowStart).toISOString(), dataGap: false, maxDate: null };
+}
+
 route('GET', '/api/analytics/hourly', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
@@ -2016,7 +2028,7 @@ route('GET', '/api/analytics/hourly', (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const { fromDate, dataGap, maxDate } = analyticsFromDate(storeId, days);
     const allOrders = db.prepare(
       "SELECT date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
     ).all(storeId, fromDate);
@@ -2039,6 +2051,8 @@ route('GET', '/api/analytics/hourly', (req, res, sess) => {
       totalOrders: allOrders.length,
       totalRevenue: allOrders.reduce((s, o) => s + (o.total_amount || 0), 0),
       days,
+      dataGap,
+      maxDate,
     };
     cacheSet(cKey, result, 60);
     ok(res, result);
@@ -2057,7 +2071,7 @@ route('GET', '/api/analytics/weekday', (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const { fromDate, dataGap, maxDate } = analyticsFromDate(storeId, days);
     const allOrders = db.prepare(
       "SELECT date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
     ).all(storeId, fromDate);
@@ -2077,7 +2091,7 @@ route('GET', '/api/analytics/weekday', (req, res, sess) => {
     const bestDay = [...byDay].sort((a, b) => b.orders - a.orders)[0];
     const avgOrdersPerDay = allOrders.length / (days || 1);
 
-    const result = { byDay, bestDay, avgOrdersPerDay, days };
+    const result = { byDay, bestDay, avgOrdersPerDay, days, dataGap, maxDate };
     cacheSet(cKey, result, 60);
     ok(res, result);
   } catch (e) {
@@ -2096,7 +2110,7 @@ route('GET', '/api/analytics/products', (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const { fromDate, dataGap, maxDate } = analyticsFromDate(storeId, days);
 
     if (type === 'ranking') {
       const products = db.prepare(`
@@ -2111,7 +2125,7 @@ route('GET', '/api/analytics/products', (req, res, sess) => {
 
       const result = {
         products: products.map(p => ({ id: p.item_id, title: p.item_title || p.item_id, orders: p.orders, units: p.units, revenue: p.revenue, avgTicket: p.orders > 0 ? p.revenue / p.orders : 0 })),
-        days, type,
+        days, type, dataGap, maxDate,
       };
       cacheSet(cKey, result, 60);
       ok(res, result);
