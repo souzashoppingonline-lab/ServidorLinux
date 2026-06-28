@@ -851,21 +851,25 @@ const JOB_HANDLERS = {
     try {
       // Get advertiser_id
       const advData = await mlFetch(`/advertising/advertisers?user_id=${storeId}`, {}, storeId).catch(e => {
-        if (e.message.includes('403') || e.message.includes('404')) return null;
-        throw e;
+        console.log(`[sync] ads_campaigns advertisers error: ${e.message.slice(0,200)}`);
+        return null;
       });
       if (!advData) {
         db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
         console.log(`[sync] ads_campaigns store=${storeId} — sem acesso a advertising`);
         return;
       }
+      console.log(`[sync] ads_campaigns advData=${JSON.stringify(advData).slice(0,200)}`);
       const advertiserId = advData.advertiser_id || advData.id || (Array.isArray(advData) ? advData[0]?.id : null);
       if (!advertiserId) {
         db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
+        console.log(`[sync] ads_campaigns — advertiserId não encontrado em:`, JSON.stringify(advData).slice(0,300));
         return;
       }
 
-      const campData = await mlFetch(`/advertising/advertisers/${advertiserId}/campaigns?limit=100`, {}, storeId).catch(() => null);
+      const campData = await mlFetch(`/advertising/advertisers/${advertiserId}/campaigns?limit=100`, {}, storeId).catch(e => {
+        console.log(`[sync] ads_campaigns campaigns error: ${e.message.slice(0,200)}`); return null;
+      });
       const campaigns = campData?.results || campData || [];
 
       const upsertCampaign = db.prepare(`
@@ -904,9 +908,9 @@ const JOB_HANDLERS = {
       db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
       console.log(`[sync] ads_campaigns done store=${storeId} count=${campaigns.length}`);
     } catch (e) {
-      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'error', e.message.slice(0, 500));
-      console.error('[sync] ads_campaigns error:', e.message);
-      throw e;
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', e.message.slice(0, 200));
+      console.log(`[sync] ads_campaigns soft-error store=${storeId}: ${e.message.slice(0,200)}`);
+      // Don't rethrow — ads is optional, don't break the scheduler
     }
   },
 
@@ -2487,6 +2491,14 @@ route('GET', '/api/ads/campaigns', (req, res, sess) => {
   } catch (e) {
     apiErr(res, 500, e.message);
   }
+});
+
+route('POST', '/api/visits/sync', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  // Force reset the sync_log so scheduleAllSyncs picks it up as stale
+  db.prepare("DELETE FROM sync_log WHERE store_id=? AND entity='visits'").run(storeId);
+  Scheduler.enqueue('sync_visits', storeId, 2);
+  ok(res, { ok: true, message: 'Sync de visitas enfileirado com prioridade alta' });
 });
 
 route('POST', '/api/ads/sync', (req, res, sess) => {
