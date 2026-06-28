@@ -735,28 +735,31 @@ function handleRequest(req, res) {
     return;
   }
 
-  // Auth check
-  const sess = getSession(req);
-  if (!sess) {
-    if (urlPath.startsWith('/api/')) {
-      apiErr(res, 401, 'Autenticação necessária');
+  // API routes require auth
+  if (urlPath.startsWith('/api/')) {
+    const sess = getSession(req);
+    if (!sess) { apiErr(res, 401, 'Autenticação necessária'); return; }
+    if (entry) {
+      Promise.resolve(entry.fn(req, res, sess)).catch(e => {
+        console.error('API error:', e.message);
+        apiErr(res, 500, 'Erro interno');
+      });
     } else {
-      res.writeHead(302, { Location: '/login' });
-      res.end();
+      apiErr(res, 404, 'Não encontrado');
     }
     return;
   }
 
-  // Authenticated API routes
+  // All other routes: serve SPA (frontend handles auth state)
   if (entry) {
+    const sess = getSession(req);
     Promise.resolve(entry.fn(req, res, sess)).catch(e => {
-      console.error('API error:', e.message);
+      console.error('Route error:', e.message);
       apiErr(res, 500, 'Erro interno');
     });
     return;
   }
 
-  // SPA fallback
   serveFile(res, '/index.html');
 }
 
