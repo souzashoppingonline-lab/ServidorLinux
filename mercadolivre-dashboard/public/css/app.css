@@ -1301,3 +1301,20 @@ tr:hover td { background: #fafafa; }
   flex-wrap: wrap;
   margin-bottom: 16px;
 }
+
+/* ── Promotion badges on listings ───────────────────────── */
+.promo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: linear-gradient(135deg, #ff6900, #ff9500);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.3px;
+}
+.listing-card--promo {
+  border-left: 3px solid #ff6900;
+}

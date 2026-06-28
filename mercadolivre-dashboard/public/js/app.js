@@ -488,8 +488,24 @@ async function loadListings() {
 }
 
 function listingCard(item) {
+  const hasPromo   = item.in_promotion;
+  const discPct    = Math.round(item.discount_pct || 0);
+  const promoName  = item.promotions?.[0]?.name || item.promotions?.[0]?.type || '';
+  const origPrice  = item.original_price > 0 ? item.original_price : null;
+
+  const promoTag = hasPromo
+    ? `<span class="promo-badge" title="${promoName || 'Em promoção'}">🏷️ ${discPct > 0 ? `-${discPct}%` : 'Promo'}</span>`
+    : '';
+
+  const precoHtml = origPrice
+    ? `<div class="listing-stat-val">${fmt.brl(item.price)}</div>
+       <div style="font-size:11px;color:#9ca3af;text-decoration:line-through">${fmt.brl(origPrice)}</div>
+       <div class="listing-stat-lab">Preço</div>`
+    : `<div class="listing-stat-val">${fmt.brl(item.price)}</div>
+       <div class="listing-stat-lab">Preço</div>`;
+
   return `
-    <div class="listing-card">
+    <div class="listing-card ${hasPromo ? 'listing-card--promo' : ''}">
       ${item.thumbnail
         ? `<img class="listing-thumb" src="${item.thumbnail}" alt="${item.title}" loading="lazy">`
         : `<div class="listing-thumb-ph">📦</div>`}
@@ -497,15 +513,13 @@ function listingCard(item) {
         <div class="listing-title" title="${item.title}">${item.title}</div>
         <div class="listing-meta">
           <span>${badge(STATUS_LISTING, item.status)}</span>
+          ${promoTag}
           <span style="color:var(--text-3)">ID: ${item.id}</span>
           ${item.permalink ? `<a href="${item.permalink}" target="_blank" style="color:var(--blue);font-size:12px">Ver no ML ↗</a>` : ''}
         </div>
       </div>
       <div class="listing-stats">
-        <div class="listing-stat">
-          <div class="listing-stat-val">${fmt.brl(item.price)}</div>
-          <div class="listing-stat-lab">Preço</div>
-        </div>
+        <div class="listing-stat">${precoHtml}</div>
         <div class="listing-stat">
           <div class="listing-stat-val">${fmt.num(item.available_quantity)}</div>
           <div class="listing-stat-lab">Estoque</div>

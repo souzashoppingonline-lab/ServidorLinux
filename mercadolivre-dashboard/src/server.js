@@ -106,6 +106,7 @@ db.exec(`
     store_id           TEXT NOT NULL,
     title              TEXT,
     price              REAL DEFAULT 0,
+    original_price     REAL DEFAULT 0,
     available_quantity INTEGER DEFAULT 0,
     sold_quantity      INTEGER DEFAULT 0,
     status             TEXT DEFAULT 'active',
@@ -114,7 +115,31 @@ db.exec(`
     condition          TEXT DEFAULT '',
     listing_type_id    TEXT DEFAULT '',
     category_id        TEXT DEFAULT '',
+    deal_ids           TEXT DEFAULT '',
     synced_at          INTEGER DEFAULT (unixepoch())
+  );
+
+
+  CREATE TABLE IF NOT EXISTS promotions (
+    id          TEXT NOT NULL,
+    store_id    TEXT NOT NULL,
+    type        TEXT DEFAULT '',
+    status      TEXT DEFAULT '',
+    name        TEXT DEFAULT '',
+    start_date  TEXT DEFAULT '',
+    finish_date TEXT DEFAULT '',
+    synced_at   INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (id, store_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS promotion_items (
+    promotion_id TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    store_id     TEXT NOT NULL,
+    original_price REAL DEFAULT 0,
+    new_price      REAL DEFAULT 0,
+    discount_pct   REAL DEFAULT 0,
+    PRIMARY KEY (promotion_id, item_id, store_id)
   );
 
   CREATE TABLE IF NOT EXISTS questions_sync (
@@ -184,6 +209,14 @@ db.exec(`
     value TEXT
   );
 `);
+
+// Schema migrations (safe to run on every start)
+for (const col of [
+  "ALTER TABLE listings ADD COLUMN original_price REAL DEFAULT 0",
+  "ALTER TABLE listings ADD COLUMN deal_ids TEXT DEFAULT ''",
+]) {
+  try { db.exec(col); } catch {} // ignore "duplicate column" errors
+}
 
 setInterval(() => {
   db.prepare('DELETE FROM cache    WHERE expires_at < unixepoch()').run();
@@ -359,17 +392,27 @@ async function processItemBatch(storeId, ids) {
   if (!ids.length) return;
   const chunk = ids.join(',');
   const batch = await mlFetch(
-    `/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`,
+    `/items?ids=${chunk}&attributes=id,title,price,original_price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id,deal_ids`,
     {}, storeId
   ).catch(() => null);
   if (!batch) return;
 
-  const insert = db.prepare(`INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO listings
+      (id,store_id,title,price,original_price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id,deal_ids)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
   db.transaction((items) => {
     for (const d of items) {
       const it = d.body || d;
       if (!it?.id) continue;
-      insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'active', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
+      const dealIds = Array.isArray(it.deal_ids) ? it.deal_ids.join(',') : (it.deal_ids || '');
+      insert.run(
+        it.id, storeId, it.title||'', it.price||0, it.original_price||0,
+        it.available_quantity||0, it.sold_quantity||0, it.status||'active',
+        it.thumbnail||'', it.permalink||'', it.condition||'',
+        it.listing_type_id||'', it.category_id||'', dealIds
+      );
     }
   })(batch);
 }
@@ -526,6 +569,63 @@ const JOB_HANDLERS = {
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
     console.log(`[sync] visits done store=${storeId} ids=${allIds.length} entries=${totalEntries}`);
   },
+
+  async sync_promotions(storeId) {
+    console.log(`[sync] promotions store=${storeId}`);
+
+    // Fetch active promotions list
+    const data = await mlFetch(
+      `/promotions?seller_id=${storeId}&status=started&limit=50`,
+      {}, storeId
+    ).catch(e => { console.error('[sync] promotions error:', e.message); return null; });
+
+    if (!data) return;
+    const promotions = Array.isArray(data) ? data : (data.results || []);
+
+    const upsertPromo = db.prepare(`
+      INSERT OR REPLACE INTO promotions(id,store_id,type,status,name,start_date,finish_date)
+      VALUES(?,?,?,?,?,?,?)
+    `);
+    const upsertItem = db.prepare(`
+      INSERT OR REPLACE INTO promotion_items(promotion_id,item_id,store_id,original_price,new_price,discount_pct)
+      VALUES(?,?,?,?,?,?)
+    `);
+
+    for (const promo of promotions) {
+      upsertPromo.run(
+        String(promo.id), storeId,
+        promo.type || '', promo.status || '',
+        promo.name || promo.type || '',
+        promo.start_date || '', promo.finish_date || ''
+      );
+
+      // Fetch items in this promotion
+      await new Promise(r => setTimeout(r, 1000));
+      const itemsData = await mlFetch(
+        `/promotions/${promo.id}/items?limit=100`,
+        {}, storeId
+      ).catch(() => null);
+
+      const promoItems = itemsData?.results || itemsData || [];
+      db.transaction((rows) => {
+        for (const pi of rows) {
+          const origPrice = pi.original_price || pi.price || 0;
+          const newPrice  = pi.new_price || pi.sale_price || pi.price || 0;
+          const discPct   = origPrice > 0 ? ((origPrice - newPrice) / origPrice) * 100 : 0;
+          upsertItem.run(String(promo.id), pi.item_id || pi.id, storeId, origPrice, newPrice, discPct);
+        }
+      })(promoItems);
+    }
+
+    // Also clear promotions that are no longer active
+    if (promotions.length > 0) {
+      const ids = promotions.map(p => `'${p.id}'`).join(',');
+      db.prepare(`DELETE FROM promotions WHERE store_id=? AND id NOT IN (${ids})`).run(storeId);
+    }
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'promotions', 'ok', '');
+    console.log(`[sync] promotions done store=${storeId} count=${promotions.length}`);
+  },
 };
 
 // ============================================================
@@ -636,10 +736,15 @@ const Scheduler = {
       const visitsStale = lastV && (Date.now()/1000 - lastV.last_sync) > 72000;
       if (visitsNeverDone) {
         console.log(`[scheduler] Visitas nunca sincronizadas para store=${s.id} — agendando agora`);
-        this.enqueue('sync_visits', s.id, 3, {}, base + 600000); // after orders+questions
+        this.enqueue('sync_visits', s.id, 3, {}, base + 600000);
       } else if (visitsStale) {
         this.enqueue('sync_visits', s.id, 3, {}, base + 600000);
       }
+
+      // Sync promotions if never done or stale (> 4h)
+      const lastP = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='promotions'").get(s.id);
+      const promosStale = !lastP || (Date.now()/1000 - lastP.last_sync) > 14400;
+      if (promosStale) this.enqueue('sync_promotions', s.id, 3, {}, base + 180000);
     });
   },
 
@@ -984,7 +1089,33 @@ route('GET', '/api/listings', (req, res, sess) => {
   try {
     const items = db.prepare('SELECT * FROM listings WHERE store_id=? AND status=? ORDER BY synced_at DESC LIMIT ? OFFSET ?').all(storeId, status, limit, offset);
     const total = db.prepare('SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status=?').get(storeId, status).n;
-    ok(res, { items, total, limit, offset });
+
+    // Attach promotion info per item
+    const promoItemsMap = {};
+    if (items.length) {
+      const placeholders = items.map(() => '?').join(',');
+      const promoRows = db.prepare(`
+        SELECT pi.item_id, pi.promotion_id, pi.original_price, pi.new_price, pi.discount_pct, p.name, p.type, p.finish_date
+        FROM promotion_items pi
+        JOIN promotions p ON p.id = pi.promotion_id AND p.store_id = pi.store_id
+        WHERE pi.store_id=? AND pi.item_id IN (${placeholders})
+      `).all(storeId, ...items.map(i => i.id));
+      for (const r of promoRows) {
+        if (!promoItemsMap[r.item_id]) promoItemsMap[r.item_id] = [];
+        promoItemsMap[r.item_id].push(r);
+      }
+    }
+
+    const enriched = items.map(item => ({
+      ...item,
+      in_promotion: !!(item.original_price > 0 || (promoItemsMap[item.id]?.length > 0) || item.deal_ids),
+      discount_pct: item.original_price > 0
+        ? Math.round(((item.original_price - item.price) / item.original_price) * 100)
+        : (promoItemsMap[item.id]?.[0]?.discount_pct || 0),
+      promotions: promoItemsMap[item.id] || [],
+    }));
+
+    ok(res, { items: enriched, total, limit, offset });
   } catch (e) {
     apiErr(res, 500, e.message);
   }
@@ -1161,6 +1292,24 @@ route('POST', '/api/scheduler/trigger', async (req, res, sess) => {
 route('DELETE', '/api/scheduler/cleanup', (req, res, sess) => {
   const deleted = db.prepare("DELETE FROM job_queue WHERE status IN ('completed','failed') AND created_at < unixepoch()-86400").run();
   ok(res, { ok: true, deleted: deleted.changes });
+});
+
+// ── Promotions ────────────────────────────────────────────
+route('GET', '/api/promotions', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  try {
+    const promos = db.prepare('SELECT * FROM promotions WHERE store_id=? ORDER BY start_date DESC').all(storeId);
+    const items  = db.prepare('SELECT * FROM promotion_items WHERE store_id=?').all(storeId);
+    const syncLog = db.prepare("SELECT last_sync,status FROM sync_log WHERE store_id=? AND entity='promotions'").get(storeId);
+    ok(res, { promotions: promos, items, last_sync: syncLog?.last_sync || 0 });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/promotions/sync', (req, res, sess) => {
+  Scheduler.enqueue('sync_promotions', sess.store_id, 2);
+  ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
 });
 
 // ── Messages ───────────────────────────────────────────────
