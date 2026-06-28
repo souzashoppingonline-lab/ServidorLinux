@@ -173,18 +173,17 @@ function createSession(storeId) {
 }
 
 function getSession(req) {
-  const cookies = req.headers.cookie || '';
-  const m = cookies.match(/ml_session=([a-f0-9]{64})/);
-  if (!m) {
-    if (cookies) console.log('[session] Cookie presente mas sem ml_session:', cookies.slice(0, 100));
-    return null;
+  // Accept token from Authorization header (Bearer) or cookie
+  let token = null;
+  const auth = req.headers['authorization'] || '';
+  if (auth.startsWith('Bearer ')) token = auth.slice(7);
+  if (!token) {
+    const m = (req.headers.cookie || '').match(/ml_session=([a-f0-9]{64})/);
+    if (m) token = m[1];
   }
-  const sess = db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(m[1]);
-  if (!sess) {
-    console.log('[session] Token não encontrado no DB:', m[1].slice(0, 16) + '...');
-  } else {
-    console.log('[session] OK store_id:', sess.store_id);
-  }
+  if (!token) return null;
+  const sess = db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(token);
+  if (!sess) console.log('[session] Token não encontrado no DB:', token.slice(0, 16) + '...');
   return sess;
 }
 
@@ -305,14 +304,10 @@ route('GET', '/ml/callback', async (req, res) => {
     );
 
     const sess = createSession(String(user.id));
-    const isHttps = (req.headers['x-forwarded-proto'] || '').includes('https');
-    const secureFlag = isHttps ? '; Secure' : '';
+    // Pass token via URL so frontend can store in localStorage (avoids cookie/proxy issues)
     res.writeHead(302, {
-      Location:    '/',
-      'Set-Cookie': [
-        `ml_session=${sess}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax${secureFlag}`,
-        `ml_state=; HttpOnly; Path=/; Max-Age=0`,
-      ],
+      Location: `/?ml_token=${sess}`,
+      'Set-Cookie': `ml_state=; HttpOnly; Path=/; Max-Age=0`,
     });
     res.end();
   } catch (e) {

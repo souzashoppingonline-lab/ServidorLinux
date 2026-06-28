@@ -4,10 +4,18 @@
 const API = (() => {
   const BASE = '';
 
+  function getToken() {
+    return localStorage.getItem('ml_token') || '';
+  }
+
   async function request(method, path, body) {
+    const token = getToken();
     const opts = {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
       credentials: 'include',
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
@@ -15,6 +23,7 @@ const API = (() => {
     const res = await fetch(BASE + path, opts);
 
     if (res.status === 401) {
+      localStorage.removeItem('ml_token');
       location.href = '/login';
       throw new Error('Sessão expirada');
     }

@@ -173,6 +173,7 @@ async function init() {
     // Logout
     document.getElementById('btnLogout').addEventListener('click', async () => {
       await API.logout().catch(() => {});
+      localStorage.removeItem('ml_token');
       location.href = '/login';
     });
 
