@@ -663,6 +663,12 @@ const JOB_HANDLERS = {
 
       if (!data) continue;
 
+      // Log response structure for debugging
+      if (i === 0) {
+        const sample = Array.isArray(data) ? data[0] : (data.items_visits || data)[0];
+        console.log(`[sync_visits] batch0 response keys=${Object.keys(data||{}).join(',') || 'array'} sample=${JSON.stringify(sample||data).slice(0,300)}`);
+      }
+
       // Response: array of { id, visits: [ { date, total } ] }
       const items = Array.isArray(data) ? data : (data.items_visits || []);
       db.transaction((rows) => {
@@ -1786,6 +1792,17 @@ route('GET', '/api/debug/item', (req, res) => {
   const promoItems = db.prepare('SELECT * FROM promotion_items WHERE item_id=? AND store_id=?').all(itemId, storeId);
   const syncLog    = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='listings'").get(storeId);
   ok(res, { in_db: inDb, promo_items: promoItems, listings_sync_log: syncLog });
+}, true);
+
+route('GET', '/api/debug/visits', (req, res) => {
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
+  const count   = db.prepare('SELECT COUNT(*) as n FROM item_visits WHERE store_id=?').get(storeId);
+  const sample  = db.prepare('SELECT * FROM item_visits WHERE store_id=? ORDER BY date DESC LIMIT 10').all(storeId);
+  const byDate  = db.prepare('SELECT date, COUNT(*) as items, SUM(visits) as total FROM item_visits WHERE store_id=? GROUP BY date ORDER BY date DESC LIMIT 10').all(storeId);
+  const syncLog = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='visits'").get(storeId);
+  const activeListings = db.prepare("SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status='active'").get(storeId);
+  ok(res, { count, sample, byDate, syncLog, activeListings });
 }, true);
 
 route('GET', '/api/promotions/debug', (req, res) => {
