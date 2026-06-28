@@ -192,6 +192,32 @@ async function init() {
       setTimeout(() => r.classList.remove('spinning'), 1000);
     });
 
+    // Sync status
+    async function loadSyncStatus() {
+      const data = await API.get('/api/sync/status').catch(() => ({ last_sync: 0 }));
+      const el = document.getElementById('syncStatus');
+      if (el && data.last_sync) {
+        const mins = Math.floor((Date.now() / 1000 - data.last_sync) / 60);
+        el.textContent = mins < 1 ? 'sincronizado agora' : `${mins}min atrás`;
+      }
+    }
+    loadSyncStatus();
+
+    // Sync button
+    document.getElementById('btnSync').addEventListener('click', async () => {
+      const btn = document.getElementById('btnSync');
+      btn.textContent = '⟳ Sincronizando...';
+      btn.disabled = true;
+      await API.post('/api/sync').catch(() => {});
+      setTimeout(() => {
+        btn.textContent = '⟳ Sync';
+        btn.disabled = false;
+        loadSyncStatus();
+        const page = location.hash.replace('#', '') || 'dashboard';
+        navigate(page);
+      }, 3000);
+    });
+
     // Toggle sidebar (mobile)
     document.getElementById('btnToggleSidebar').addEventListener('click', () => {
       document.getElementById('sidebar').classList.toggle('open');

@@ -64,6 +64,69 @@ db.exec(`
     payload     TEXT,
     received_at INTEGER DEFAULT (unixepoch())
   );
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id            TEXT PRIMARY KEY,
+    store_id      TEXT NOT NULL,
+    status        TEXT,
+    total_amount  REAL DEFAULT 0,
+    date_created  TEXT,
+    date_closed   TEXT,
+    buyer_id      TEXT,
+    buyer_nickname TEXT,
+    shipping_status TEXT,
+    synced_at     INTEGER DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS order_items (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id   TEXT NOT NULL,
+    store_id   TEXT NOT NULL,
+    item_id    TEXT,
+    item_title TEXT,
+    quantity   INTEGER DEFAULT 1,
+    unit_price REAL DEFAULT 0,
+    category_id TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS listings (
+    id                 TEXT PRIMARY KEY,
+    store_id           TEXT NOT NULL,
+    title              TEXT,
+    price              REAL DEFAULT 0,
+    available_quantity INTEGER DEFAULT 0,
+    sold_quantity      INTEGER DEFAULT 0,
+    status             TEXT DEFAULT 'active',
+    thumbnail          TEXT DEFAULT '',
+    permalink          TEXT DEFAULT '',
+    condition          TEXT DEFAULT '',
+    listing_type_id    TEXT DEFAULT '',
+    category_id        TEXT DEFAULT '',
+    synced_at          INTEGER DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS questions_sync (
+    id             TEXT PRIMARY KEY,
+    store_id       TEXT NOT NULL,
+    item_id        TEXT,
+    item_title     TEXT DEFAULT '',
+    buyer_nickname TEXT DEFAULT '',
+    text           TEXT,
+    status         TEXT DEFAULT 'UNANSWERED',
+    date_created   TEXT,
+    answer_text    TEXT,
+    answer_date    TEXT,
+    synced_at      INTEGER DEFAULT (unixepoch())
+  );
+
+  CREATE TABLE IF NOT EXISTS sync_log (
+    store_id   TEXT NOT NULL,
+    entity     TEXT NOT NULL,
+    last_sync  INTEGER DEFAULT 0,
+    status     TEXT DEFAULT 'never',
+    error      TEXT DEFAULT '',
+    PRIMARY KEY (store_id, entity)
+  );
 `);
 
 setInterval(() => {
@@ -169,6 +232,170 @@ async function exchangeCode(code) {
   if (res.status === 429) throw new Error('Rate limit ML (429) — aguarde alguns minutos e tente novamente');
   if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text.slice(0, 200)}`);
   return JSON.parse(text);
+}
+
+// ============================================================
+// SYNC FUNCTIONS
+// ============================================================
+async function syncOrders(storeId) {
+  const log = db.prepare('SELECT last_sync FROM sync_log WHERE store_id=? AND entity=?').get(storeId, 'orders');
+  const lastSync = log?.last_sync || 0;
+  const from = lastSync > 0
+    ? new Date(lastSync * 1000).toISOString().split('T')[0]
+    : new Date(Date.now() - 90 * 86400000).toISOString().split('T')[0];
+
+  console.log(`[sync] orders store=${storeId} from=${from}`);
+  let offset = 0;
+  let total = 0;
+
+  while (true) {
+    const page = await mlFetch(
+      `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_asc`,
+      {}, storeId
+    ).catch(e => { console.error('[sync] orders error:', e.message); return null; });
+
+    if (!page || !page.results?.length) break;
+
+    const insertOrder = db.prepare(`
+      INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status)
+      VALUES(?,?,?,?,?,?,?,?,?)
+    `);
+    const insertItem = db.prepare(`
+      INSERT OR IGNORE INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id)
+      VALUES(?,?,?,?,?,?,?)
+    `);
+    const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
+
+    const syncMany = db.transaction((orders) => {
+      for (const o of orders) {
+        insertOrder.run(
+          o.id, storeId, o.status, o.total_amount || 0,
+          o.date_created, o.date_closed, String(o.buyer?.id || ''),
+          o.buyer?.nickname || '', o.shipping?.status || ''
+        );
+        deleteItems.run(o.id);
+        for (const item of (o.order_items || [])) {
+          insertItem.run(o.id, storeId, item.item?.id || '', item.item?.title || '', item.quantity || 1, item.unit_price || 0, item.item?.category_id || '');
+        }
+      }
+    });
+
+    syncMany(page.results);
+    total += page.results.length;
+
+    if (page.results.length < 50) break;
+    offset += 50;
+    if (offset >= 1000) break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)')
+    .run(storeId, 'orders', 'ok', '');
+  console.log(`[sync] orders done store=${storeId} total=${total}`);
+}
+
+async function syncListings(storeId) {
+  console.log(`[sync] listings store=${storeId}`);
+  let offset = 0;
+  let total = 0;
+
+  while (true) {
+    const search = await mlFetch(
+      `/users/${storeId}/items/search?status=active&limit=50&offset=${offset}`,
+      {}, storeId
+    ).catch(e => { console.error('[sync] listings search error:', e.message); return null; });
+
+    if (!search || !search.results?.length) break;
+
+    const allIds = search.results;
+    for (let i = 0; i < allIds.length; i += 20) {
+      if (i > 0) await new Promise(r => setTimeout(r, 300));
+      const chunk = allIds.slice(i, i + 20).join(',');
+      const batch = await mlFetch(
+        `/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`,
+        {}, storeId
+      ).catch(() => null);
+
+      if (!batch) continue;
+      const insert = db.prepare(`
+        INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      `);
+      db.transaction((items) => {
+        for (const d of items) {
+          const it = d.body || d;
+          if (!it?.id) continue;
+          insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
+        }
+      })(batch);
+      total += batch.length;
+    }
+
+    if (search.results.length < 50) break;
+    offset += 50;
+    if (offset >= 2000) break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  // Also sync paused items
+  const pausedSearch = await mlFetch(`/users/${storeId}/items/search?status=paused&limit=50&offset=0`, {}, storeId).catch(() => null);
+  if (pausedSearch?.results?.length) {
+    for (let i = 0; i < pausedSearch.results.length; i += 20) {
+      const chunk = pausedSearch.results.slice(i, i + 20).join(',');
+      const batch = await mlFetch(`/items?ids=${chunk}&attributes=id,title,price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id`, {}, storeId).catch(() => null);
+      if (!batch) continue;
+      const insert = db.prepare(`INSERT OR REPLACE INTO listings(id,store_id,title,price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+      db.transaction((items) => {
+        for (const d of items) {
+          const it = d.body || d;
+          if (!it?.id) continue;
+          insert.run(it.id, storeId, it.title||'', it.price||0, it.available_quantity||0, it.sold_quantity||0, it.status||'', it.thumbnail||'', it.permalink||'', it.condition||'', it.listing_type_id||'', it.category_id||'');
+        }
+      })(batch);
+    }
+  }
+
+  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'listings', 'ok', '');
+  console.log(`[sync] listings done store=${storeId} total=${total}`);
+}
+
+async function syncQuestions(storeId) {
+  console.log(`[sync] questions store=${storeId}`);
+  const page = await mlFetch(
+    `/questions/search?seller_id=${storeId}&status=UNANSWERED&limit=50&offset=0&sort_fields=date_created&sort_types=DESC`,
+    {}, storeId
+  ).catch(() => null);
+
+  if (!page) return;
+
+  const insert = db.prepare(`
+    INSERT OR REPLACE INTO questions_sync(id,store_id,item_id,item_title,buyer_nickname,text,status,date_created,answer_text,answer_date)
+    VALUES(?,?,?,?,?,?,?,?,?,?)
+  `);
+
+  db.transaction((qs) => {
+    for (const q of qs) {
+      insert.run(String(q.id), storeId, q.item_id||'', '', q.from?.nickname||'', q.text||'', q.status||'UNANSWERED', q.date_created||'', q.answer?.text||'', q.answer?.date_created||'');
+    }
+  })(page.questions || []);
+
+  db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'questions', 'ok', '');
+  console.log(`[sync] questions done store=${storeId}`);
+}
+
+async function syncAllStores() {
+  const stores = db.prepare('SELECT * FROM stores').all();
+  for (const store of stores) {
+    try {
+      await syncOrders(store.id);
+      await new Promise(r => setTimeout(r, 1000));
+      await syncListings(store.id);
+      await new Promise(r => setTimeout(r, 1000));
+      await syncQuestions(store.id);
+    } catch(e) {
+      console.error(`[sync] error store=${store.id}:`, e.message);
+    }
+  }
 }
 
 // ============================================================
@@ -400,64 +627,73 @@ route('GET', '/api/me', (req, res, sess) => {
 });
 
 // ── Dashboard ──────────────────────────────────────────────
-route('GET', '/api/dashboard', async (req, res, sess) => {
+route('GET', '/api/dashboard', (req, res, sess) => {
   const storeId = qp(req).get('storeId') || sess.store_id;
   const cached  = cacheGet(`dashboard:${storeId}`);
   if (cached) { ok(res, cached); return; }
 
   try {
-    const now    = new Date();
-    const today  = now.toISOString().split('T')[0];
-    const d30ago = new Date(now - 30 * 86400000).toISOString().split('T')[0];
+    const now = Math.floor(Date.now() / 1000);
+    const from30 = now - 30 * 86400;
+    const from7  = now - 7 * 86400;
+    const from1  = now - 86400;
+    const todayStr = new Date().toISOString().split('T')[0];
 
-    const [activeItems, pausedItems, orders30d, ordersToday, questions] = await Promise.all([
-      mlFetch(`/users/${storeId}/items/search?status=active&limit=1`,  {}, storeId).catch(() => ({ paging: { total: 0 } })),
-      mlFetch(`/users/${storeId}/items/search?status=paused&limit=1`,  {}, storeId).catch(() => ({ paging: { total: 0 } })),
-      mlFetch(`/orders/search?seller=${storeId}&order.status=paid&date_created.from=${d30ago}T00:00:00.000-03:00&limit=50&sort=date_desc`, {}, storeId).catch(() => ({ results: [], paging: { total: 0 } })),
-      mlFetch(`/orders/search?seller=${storeId}&order.status=paid&date_created.from=${today}T00:00:00.000-03:00&limit=50&sort=date_desc`, {}, storeId).catch(() => ({ results: [], paging: { total: 0 } })),
-      mlFetch(`/questions/search?seller_id=${storeId}&status=UNANSWERED&limit=1`, {}, storeId).catch(() => ({ paging: { total: 0 } })),
-    ]);
+    const orders30 = db.prepare(
+      "SELECT * FROM orders WHERE store_id=? AND date_created >= datetime(?,'unixepoch') AND status='paid'"
+    ).all(storeId, from30);
 
-    const revenue30d    = (orders30d.results || []).reduce((s, o) => s + (o.total_amount || 0), 0);
-    const revenueToday  = (ordersToday.results || []).reduce((s, o) => s + (o.total_amount || 0), 0);
-    const totalOrders30 = orders30d.paging?.total || orders30d.results?.length || 0;
-    const avgTicket     = totalOrders30 > 0 ? revenue30d / totalOrders30 : 0;
+    const revenue30d   = orders30.reduce((s, o) => s + (o.total_amount || 0), 0);
+    const totalOrders30 = orders30.length;
+    const avgTicket    = totalOrders30 > 0 ? revenue30d / totalOrders30 : 0;
+
+    const todayOrders = orders30.filter(o => o.date_created && o.date_created.startsWith(todayStr));
+    const revenueToday = todayOrders.reduce((s, o) => s + (o.total_amount || 0), 0);
+
+    const activeListings  = db.prepare("SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status='active'").get(storeId)?.n || 0;
+    const pausedListings  = db.prepare("SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status='paused'").get(storeId)?.n || 0;
+    const pendingQuestions = db.prepare("SELECT COUNT(*) as n FROM questions_sync WHERE store_id=? AND status='UNANSWERED'").get(storeId)?.n || 0;
 
     const dailyMap = {};
-    (orders30d.results || []).forEach(o => {
+    orders30.forEach(o => {
       const day = o.date_created?.split('T')[0];
       if (day) dailyMap[day] = (dailyMap[day] || 0) + (o.total_amount || 0);
     });
 
+    const nowDate = new Date();
     const chartData = [];
     for (let i = 29; i >= 0; i--) {
-      const d = new Date(now - i * 86400000).toISOString().split('T')[0];
+      const d = new Date(nowDate - i * 86400000).toISOString().split('T')[0];
       chartData.push({ date: d, revenue: dailyMap[d] || 0 });
     }
 
+    const recentRaw = db.prepare(
+      "SELECT o.*, GROUP_CONCAT(oi.item_title) as item_titles FROM orders o LEFT JOIN order_items oi ON o.id=oi.order_id WHERE o.store_id=? AND o.status='paid' GROUP BY o.id ORDER BY o.date_created DESC LIMIT 8"
+    ).all(storeId);
+
     const result = {
       kpis: {
-        activeListings:   activeItems.paging?.total  || 0,
-        pausedListings:   pausedItems.paging?.total  || 0,
-        orders30d:        totalOrders30,
-        ordersToday:      ordersToday.paging?.total  || 0,
+        activeListings,
+        pausedListings,
+        orders30d: totalOrders30,
+        ordersToday: todayOrders.length,
         revenue30d,
         revenueToday,
         avgTicket,
-        pendingQuestions: questions.paging?.total    || 0,
+        pendingQuestions,
       },
       chartData,
-      recentOrders: (orders30d.results || []).slice(0, 8).map(o => ({
-        id:       o.id,
-        date:     o.date_created,
-        buyer:    o.buyer?.nickname || '-',
-        amount:   o.total_amount   || 0,
-        status:   o.status,
-        items:    (o.order_items || []).map(i => i.item?.title).filter(Boolean).join(', '),
+      recentOrders: recentRaw.map(o => ({
+        id:     o.id,
+        date:   o.date_created,
+        buyer:  o.buyer_nickname || '-',
+        amount: o.total_amount || 0,
+        status: o.status,
+        items:  o.item_titles || '',
       })),
     };
 
-    cacheSet(`dashboard:${storeId}`, result, 300);
+    cacheSet(`dashboard:${storeId}`, result, 60);
     ok(res, result);
   } catch (e) {
     console.error('Dashboard error:', e.message);
@@ -466,7 +702,7 @@ route('GET', '/api/dashboard', async (req, res, sess) => {
 });
 
 // ── Listings ───────────────────────────────────────────────
-route('GET', '/api/listings', async (req, res, sess) => {
+route('GET', '/api/listings', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const status  = p.get('status')  || 'active';
@@ -474,23 +710,9 @@ route('GET', '/api/listings', async (req, res, sess) => {
   const offset  = parseInt(p.get('offset') || '0');
 
   try {
-    const search = await mlFetch(
-      `/users/${storeId}/items/search?status=${encodeURIComponent(status)}&limit=${limit}&offset=${offset}`,
-      {}, storeId,
-    );
-    const allIds = search.results || [];
-    let items = [];
-    // ML only allows 20 IDs per request — add small delay between chunks
-    for (let i = 0; i < allIds.length; i += 20) {
-      if (i > 0) await new Promise(r => setTimeout(r, 300));
-      const chunk = allIds.slice(i, i + 20).join(',');
-      const batch = await mlFetch(
-        `/items?ids=${chunk}&attributes=id,title,price,available_quantity,thumbnail,status,permalink,condition,listing_type_id,sold_quantity,category_id`,
-        {}, storeId,
-      );
-      items = items.concat((batch || []).map(d => d.body || d).filter(i => i && i.id));
-    }
-    ok(res, { items, total: search.paging?.total || 0, limit, offset });
+    const items = db.prepare('SELECT * FROM listings WHERE store_id=? AND status=? ORDER BY synced_at DESC LIMIT ? OFFSET ?').all(storeId, status, limit, offset);
+    const total = db.prepare('SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status=?').get(storeId, status).n;
+    ok(res, { items, total, limit, offset });
   } catch (e) {
     apiErr(res, 500, e.message);
   }
@@ -519,7 +741,7 @@ route('PUT', '/api/listings', async (req, res, sess) => {
 });
 
 // ── Orders ─────────────────────────────────────────────────
-route('GET', '/api/orders', async (req, res, sess) => {
+route('GET', '/api/orders', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const status  = p.get('status')  || '';
@@ -528,40 +750,57 @@ route('GET', '/api/orders', async (req, res, sess) => {
   const limit   = Math.min(parseInt(p.get('limit')  || '50'), 100);
   const offset  = parseInt(p.get('offset') || '0');
 
-  const params = new URLSearchParams({ seller: storeId, sort: 'date_desc', limit, offset });
-  if (status) params.set('order.status', status);
-  if (from)   params.set('date_created.from', `${from}T00:00:00.000-03:00`);
-  if (to)     params.set('date_created.to',   `${to}T23:59:59.000-03:00`);
-
   try {
-    const data = await mlFetch(`/orders/search?${params}`, {}, storeId);
-    ok(res, {
-      orders: (data.results || []).map(o => ({
-        id:              o.id,
-        date:            o.date_created,
-        buyer:           { id: o.buyer?.id, nickname: o.buyer?.nickname },
-        amount:          o.total_amount   || 0,
-        status:          o.status,
-        payment_status:  o.payments?.[0]?.status,
-        shipping_status: o.shipping?.status,
-        pack_id:         o.pack_id,
-        items: (o.order_items || []).map(i => ({
-          id:         i.item?.id,
-          title:      i.item?.title,
-          quantity:   i.quantity,
-          unit_price: i.unit_price,
-          thumbnail:  i.item?.thumbnail,
-        })),
+    let where = 'o.store_id=?';
+    const args = [storeId];
+    if (status) { where += ' AND o.status=?'; args.push(status); }
+    if (from)   { where += ' AND o.date_created >= ?'; args.push(`${from}T00:00:00`); }
+    if (to)     { where += ' AND o.date_created <= ?'; args.push(`${to}T23:59:59`); }
+
+    const ordersRaw = db.prepare(
+      `SELECT o.id, o.date_created, o.status, o.total_amount, o.buyer_id, o.buyer_nickname, o.shipping_status
+       FROM orders o WHERE ${where} ORDER BY o.date_created DESC LIMIT ? OFFSET ?`
+    ).all(...args, limit, offset);
+
+    const totalRow = db.prepare(`SELECT COUNT(*) as n FROM orders o WHERE ${where}`).get(...args);
+
+    const orderIds = ordersRaw.map(o => o.id);
+    const itemsMap = {};
+    if (orderIds.length) {
+      const placeholders = orderIds.map(() => '?').join(',');
+      const items = db.prepare(`SELECT * FROM order_items WHERE order_id IN (${placeholders})`).all(...orderIds);
+      items.forEach(i => {
+        if (!itemsMap[i.order_id]) itemsMap[i.order_id] = [];
+        itemsMap[i.order_id].push(i);
+      });
+    }
+
+    const orders = ordersRaw.map(o => ({
+      id:              o.id,
+      date:            o.date_created,
+      buyer:           { id: o.buyer_id, nickname: o.buyer_nickname },
+      amount:          o.total_amount || 0,
+      status:          o.status,
+      payment_status:  o.status,
+      shipping_status: o.shipping_status,
+      pack_id:         null,
+      items: (itemsMap[o.id] || []).map(i => ({
+        id:         i.item_id,
+        title:      i.item_title,
+        quantity:   i.quantity,
+        unit_price: i.unit_price,
+        thumbnail:  '',
       })),
-      paging: data.paging || {},
-    });
+    }));
+
+    ok(res, { orders, paging: { total: totalRow?.n || 0, limit, offset } });
   } catch (e) {
     apiErr(res, 500, e.message);
   }
 });
 
 // ── Questions ──────────────────────────────────────────────
-route('GET', '/api/questions', async (req, res, sess) => {
+route('GET', '/api/questions', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const status  = p.get('status')  || 'UNANSWERED';
@@ -569,22 +808,23 @@ route('GET', '/api/questions', async (req, res, sess) => {
   const offset  = parseInt(p.get('offset') || '0');
 
   try {
-    const data = await mlFetch(
-      `/questions/search?seller_id=${storeId}&status=${status}&sort_fields=date_created&sort_types=DESC&limit=${limit}&offset=${offset}`,
-      {}, storeId,
-    );
+    const rows = db.prepare(
+      'SELECT * FROM questions_sync WHERE store_id=? AND status=? ORDER BY date_created DESC LIMIT ? OFFSET ?'
+    ).all(storeId, status, limit, offset);
+    const total = db.prepare('SELECT COUNT(*) as n FROM questions_sync WHERE store_id=? AND status=?').get(storeId, status).n;
+
     ok(res, {
-      questions: (data.questions || []).map(q => ({
+      questions: rows.map(q => ({
         id:         q.id,
         text:       q.text,
         status:     q.status,
         date:       q.date_created,
         item_id:    q.item_id,
-        item_title: q.item?.title,
-        from:       { id: q.from?.id, nickname: q.from?.nickname },
-        answer:     q.answer ? { text: q.answer.text, date: q.answer.date_created } : null,
+        item_title: q.item_title,
+        from:       { id: null, nickname: q.buyer_nickname },
+        answer:     q.answer_text ? { text: q.answer_text, date: q.answer_date } : null,
       })),
-      paging: data.paging || {},
+      paging: { total, limit, offset },
     });
   } catch (e) {
     apiErr(res, 500, e.message);
@@ -605,6 +845,20 @@ route('POST', '/api/questions/answer', async (req, res, sess) => {
   } catch (e) {
     apiErr(res, 500, e.message);
   }
+});
+
+// ── Sync ───────────────────────────────────────────────────
+route('POST', '/api/sync', (req, res, sess) => {
+  syncAllStores().catch(e => console.error('[sync] manual trigger error:', e.message));
+  ok(res, { ok: true, message: 'Sincronização iniciada em background' });
+});
+
+route('GET', '/api/sync/status', (req, res, sess) => {
+  const logs = db.prepare('SELECT * FROM sync_log WHERE store_id=?').all(sess.store_id);
+  const store = db.prepare('SELECT last_sync FROM stores WHERE id=?').get(sess.store_id);
+  // Use the most recent sync across all entities as last_sync
+  const lastSync = logs.reduce((max, l) => Math.max(max, l.last_sync || 0), store?.last_sync || 0);
+  ok(res, { logs, last_sync: lastSync });
 });
 
 // ── Messages ───────────────────────────────────────────────
@@ -641,30 +895,8 @@ route('POST', '/api/messages', async (req, res, sess) => {
   }
 });
 
-// ── Analytics shared order fetcher ────────────────────────
-async function fetchOrdersShared(storeId, days) {
-  const cKey = `orders:shared:${storeId}:${days}`;
-  const cached = cacheGet(cKey);
-  if (cached) return cached;
-  const now = new Date();
-  const from = new Date(now - days * 86400000).toISOString().split('T')[0];
-  const allOrders = [];
-  for (let offset = 0; offset < 300; offset += 50) {
-    const page = await mlFetch(
-      `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_desc`,
-      {}, storeId
-    ).catch(() => null);
-    if (!page || !page.results?.length) break;
-    allOrders.push(...page.results);
-    if (page.results.length < 50) break;
-    if (offset > 0) await new Promise(r => setTimeout(r, 200));
-  }
-  cacheSet(cKey, allOrders, 300);
-  return allOrders;
-}
-
 // ── Analytics: hourly ──────────────────────────────────────
-route('GET', '/api/analytics/hourly', async (req, res, sess) => {
+route('GET', '/api/analytics/hourly', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const days    = Math.min(parseInt(p.get('days') || '7'), 30);
@@ -673,12 +905,14 @@ route('GET', '/api/analytics/hourly', async (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const allOrders = await fetchOrdersShared(storeId, days);
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const allOrders = db.prepare(
+      "SELECT date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
+    ).all(storeId, fromDate);
 
     const byHour = Array.from({ length: 24 }, (_, h) => ({ hour: h, orders: 0, revenue: 0 }));
     allOrders.forEach(o => {
       const d = new Date(o.date_created);
-      // Convert UTC to Brazil UTC-3
       const h = ((d.getUTCHours() - 3) + 24) % 24;
       byHour[h].orders++;
       byHour[h].revenue += o.total_amount || 0;
@@ -695,7 +929,7 @@ route('GET', '/api/analytics/hourly', async (req, res, sess) => {
       totalRevenue: allOrders.reduce((s, o) => s + (o.total_amount || 0), 0),
       days,
     };
-    cacheSet(cKey, result, 300);
+    cacheSet(cKey, result, 60);
     ok(res, result);
   } catch (e) {
     apiErr(res, 500, e.message);
@@ -703,7 +937,7 @@ route('GET', '/api/analytics/hourly', async (req, res, sess) => {
 });
 
 // ── Analytics: weekday ─────────────────────────────────────
-route('GET', '/api/analytics/weekday', async (req, res, sess) => {
+route('GET', '/api/analytics/weekday', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const days    = Math.min(parseInt(p.get('days') || '30'), 90);
@@ -712,13 +946,16 @@ route('GET', '/api/analytics/weekday', async (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const allOrders = await fetchOrdersShared(storeId, days);
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const allOrders = db.prepare(
+      "SELECT date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
+    ).all(storeId, fromDate);
+
     const dayNames = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
     const byDay = Array.from({ length: 7 }, (_, d) => ({ day: d, name: dayNames[d], orders: 0, revenue: 0 }));
 
     allOrders.forEach(o => {
       const d = new Date(o.date_created);
-      // Adjust to Brazil UTC-3
       const adjustedMs = d.getTime() - 3 * 3600000;
       const dow = new Date(adjustedMs).getUTCDay();
       byDay[dow].orders++;
@@ -730,7 +967,7 @@ route('GET', '/api/analytics/weekday', async (req, res, sess) => {
     const avgOrdersPerDay = allOrders.length / (days || 1);
 
     const result = { byDay, bestDay, avgOrdersPerDay, days };
-    cacheSet(cKey, result, 300);
+    cacheSet(cKey, result, 60);
     ok(res, result);
   } catch (e) {
     apiErr(res, 500, e.message);
@@ -738,7 +975,7 @@ route('GET', '/api/analytics/weekday', async (req, res, sess) => {
 });
 
 // ── Analytics: products ────────────────────────────────────
-route('GET', '/api/analytics/products', async (req, res, sess) => {
+route('GET', '/api/analytics/products', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const days    = Math.min(parseInt(p.get('days') || '30'), 90);
@@ -748,90 +985,81 @@ route('GET', '/api/analytics/products', async (req, res, sess) => {
   if (cached) { ok(res, cached); return; }
 
   try {
-    const allOrders = await fetchOrdersShared(storeId, days);
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
 
     if (type === 'ranking') {
-      const byProduct = {};
-      allOrders.forEach(o => {
-        (o.order_items || []).forEach(i => {
-          const id = i.item?.id;
-          if (!id) return;
-          if (!byProduct[id]) byProduct[id] = { id, title: i.item?.title || id, orders: 0, units: 0, revenue: 0 };
-          byProduct[id].orders++;
-          byProduct[id].units   += i.quantity || 0;
-          byProduct[id].revenue += (i.unit_price || 0) * (i.quantity || 0);
-        });
-      });
-      const products = Object.values(byProduct)
-        .sort((a, b) => b.revenue - a.revenue)
-        .slice(0, 50)
-        .map(pr => ({ ...pr, avgTicket: pr.orders > 0 ? pr.revenue / pr.orders : 0 }));
-      const result = { products, days, type };
-      cacheSet(cKey, result, 300);
+      const products = db.prepare(`
+        SELECT oi.item_id, oi.item_title, COUNT(DISTINCT oi.order_id) as orders, SUM(oi.quantity) as units, SUM(oi.quantity * oi.unit_price) as revenue
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        WHERE oi.store_id=? AND o.date_created>=? AND o.status='paid'
+        GROUP BY oi.item_id
+        ORDER BY revenue DESC
+        LIMIT 50
+      `).all(storeId, fromDate);
+
+      const result = {
+        products: products.map(p => ({ id: p.item_id, title: p.item_title || p.item_id, orders: p.orders, units: p.units, revenue: p.revenue, avgTicket: p.orders > 0 ? p.revenue / p.orders : 0 })),
+        days, type,
+      };
+      cacheSet(cKey, result, 60);
       ok(res, result);
 
     } else if (type === 'trending' || type === 'declining') {
-      const last7Orders = await fetchOrdersShared(storeId, 7);
-      const prevOrders  = allOrders.filter(o => {
-        const d = new Date(o.date_created);
-        const age = (Date.now() - d.getTime()) / 86400000;
-        return age > 7 && age <= days;
-      });
+      const from7 = new Date(Date.now() - 7 * 86400000).toISOString();
       const prevDays = days - 7;
 
-      function buildProductMap(orders) {
-        const m = {};
-        orders.forEach(o => {
-          (o.order_items || []).forEach(i => {
-            const id = i.item?.id;
-            if (!id) return;
-            if (!m[id]) m[id] = { id, title: i.item?.title || id, orders: 0, units: 0, revenue: 0 };
-            m[id].orders++;
-            m[id].units   += i.quantity || 0;
-            m[id].revenue += (i.unit_price || 0) * (i.quantity || 0);
-          });
-        });
-        return m;
-      }
+      const recentRows = db.prepare(`
+        SELECT oi.item_id, oi.item_title, COUNT(DISTINCT oi.order_id) as orders
+        FROM order_items oi JOIN orders o ON o.id=oi.order_id
+        WHERE oi.store_id=? AND o.date_created>=? AND o.status='paid'
+        GROUP BY oi.item_id
+      `).all(storeId, from7);
 
-      const recentMap = buildProductMap(last7Orders);
-      const prevMap   = buildProductMap(prevOrders);
-      const allIds    = new Set([...Object.keys(recentMap), ...Object.keys(prevMap)]);
+      const prevRows = db.prepare(`
+        SELECT oi.item_id, oi.item_title, COUNT(DISTINCT oi.order_id) as orders
+        FROM order_items oi JOIN orders o ON o.id=oi.order_id
+        WHERE oi.store_id=? AND o.date_created>=? AND o.date_created<? AND o.status='paid'
+        GROUP BY oi.item_id
+      `).all(storeId, fromDate, from7);
+
+      const recentMap = {};
+      recentRows.forEach(r => { recentMap[r.item_id] = r; });
+      const prevMap = {};
+      prevRows.forEach(r => { prevMap[r.item_id] = r; });
+      const allIds = new Set([...Object.keys(recentMap), ...Object.keys(prevMap)]);
 
       const products = [];
       allIds.forEach(id => {
-        const recent = recentMap[id] || { orders: 0, revenue: 0 };
-        const prev   = prevMap[id]   || { orders: 0, revenue: 0 };
+        const recent = recentMap[id] || { orders: 0 };
+        const prev   = prevMap[id]   || { orders: 0 };
         const recentRate = recent.orders / 7;
         const prevRate   = prevDays > 0 ? prev.orders / prevDays : 0;
         if (prevRate === 0 && recentRate === 0) return;
         const variation = prevRate > 0 ? ((recentRate - prevRate) / prevRate) * 100 : (recentRate > 0 ? 100 : 0);
-        const title = (recentMap[id] || prevMap[id])?.title || id;
-
+        const title = (recentMap[id] || prevMap[id])?.item_title || id;
         if (type === 'trending'  && variation >= 20)  products.push({ id, title, recent7d: recent.orders, prevPeriod: prev.orders, variation });
         if (type === 'declining' && variation <= -20) products.push({ id, title, recent7d: recent.orders, prevPeriod: prev.orders, variation });
       });
 
       products.sort((a, b) => type === 'trending' ? b.variation - a.variation : a.variation - b.variation);
       const result = { products, days, type };
-      cacheSet(cKey, result, 300);
+      cacheSet(cKey, result, 60);
       ok(res, result);
 
     } else if (type === 'problematic') {
-      const soldIds = new Set();
-      allOrders.forEach(o => {
-        (o.order_items || []).forEach(i => { if (i.item?.id) soldIds.add(String(i.item.id)); });
-      });
+      const soldIds = new Set(
+        db.prepare(`SELECT DISTINCT oi.item_id FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.store_id=? AND o.date_created>=? AND o.status='paid'`)
+          .all(storeId, fromDate).map(r => r.item_id)
+      );
 
-      const search = await mlFetch(`/users/${storeId}/items/search?status=active&limit=100`, {}, storeId).catch(() => ({ results: [] }));
-      const allItemIds = search.results || [];
-      const problematic = allItemIds
-        .filter(id => !soldIds.has(String(id)))
-        .slice(0, 100)
-        .map(id => ({ id, title: id, daysSinceLastSale: days }));
+      const activeListings = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active' LIMIT 100").all(storeId);
+      const problematic = activeListings
+        .filter(l => !soldIds.has(l.id))
+        .map(l => ({ id: l.id, title: l.id, daysSinceLastSale: days }));
 
       const result = { products: problematic, days, type };
-      cacheSet(cKey, result, 300);
+      cacheSet(cKey, result, 60);
       ok(res, result);
     } else {
       apiErr(res, 400, 'type inválido');
@@ -842,7 +1070,7 @@ route('GET', '/api/analytics/products', async (req, res, sess) => {
 });
 
 // ── Metrics ────────────────────────────────────────────────
-route('GET', '/api/metrics', async (req, res, sess) => {
+route('GET', '/api/metrics', (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const days    = Math.min(parseInt(p.get('days') || '30'), 90);
@@ -850,32 +1078,22 @@ route('GET', '/api/metrics', async (req, res, sess) => {
   const cached  = cacheGet(cKey);
   if (cached) { ok(res, cached); return; }
 
-  const now  = new Date();
-  const from = new Date(now - days * 86400000).toISOString().split('T')[0];
-  const to   = now.toISOString().split('T')[0];
-
   try {
-    // Fetch up to 200 orders for analysis
-    const [batch1, batch2] = await Promise.all([
-      mlFetch(`/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&date_created.to=${to}T23:59:59.000-03:00&limit=50&offset=0&sort=date_desc`, {}, storeId).catch(() => ({ results: [] })),
-      mlFetch(`/orders/search?seller=${storeId}&order.status=paid&date_created.from=${from}T00:00:00.000-03:00&date_created.to=${to}T23:59:59.000-03:00&limit=50&offset=50&sort=date_desc`, {}, storeId).catch(() => ({ results: [] })),
-    ]);
-    const allOrders = [...(batch1.results || []), ...(batch2.results || [])];
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+    const allOrders = db.prepare(
+      "SELECT id, date_created, total_amount FROM orders WHERE store_id=? AND date_created>=? AND status='paid'"
+    ).all(storeId, fromDate);
 
     const totalRevenue = allOrders.reduce((s, o) => s + (o.total_amount || 0), 0);
     const totalOrders  = allOrders.length;
     const avgTicket    = totalOrders > 0 ? totalRevenue / totalOrders : 0;
 
-    const byProduct = {};
-    allOrders.forEach(o => {
-      (o.order_items || []).forEach(i => {
-        const key = i.item?.id;
-        if (!key) return;
-        if (!byProduct[key]) byProduct[key] = { id: key, title: i.item?.title || key, revenue: 0, units: 0 };
-        byProduct[key].revenue += (i.unit_price || 0) * (i.quantity || 0);
-        byProduct[key].units   += i.quantity || 0;
-      });
-    });
+    const topProducts = db.prepare(`
+      SELECT oi.item_id as id, oi.item_title as title, SUM(oi.quantity * oi.unit_price) as revenue, SUM(oi.quantity) as units
+      FROM order_items oi JOIN orders o ON o.id=oi.order_id
+      WHERE oi.store_id=? AND o.date_created>=? AND o.status='paid'
+      GROUP BY oi.item_id ORDER BY revenue DESC LIMIT 10
+    `).all(storeId, fromDate);
 
     const daily = {};
     allOrders.forEach(o => {
@@ -886,6 +1104,7 @@ route('GET', '/api/metrics', async (req, res, sess) => {
       daily[day].orders++;
     });
 
+    const now = new Date();
     const dailyChart = [];
     for (let i = days - 1; i >= 0; i--) {
       const d = new Date(now - i * 86400000).toISOString().split('T')[0];
@@ -895,10 +1114,10 @@ route('GET', '/api/metrics', async (req, res, sess) => {
     const result = {
       summary: { totalRevenue, totalOrders, avgTicket },
       dailyChart,
-      topProducts: Object.values(byProduct).sort((a, b) => b.revenue - a.revenue).slice(0, 10),
+      topProducts: topProducts.map(p => ({ id: p.id, title: p.title || p.id, revenue: p.revenue, units: p.units })),
     };
 
-    cacheSet(cKey, result, 600);
+    cacheSet(cKey, result, 60);
     ok(res, result);
   } catch (e) {
     apiErr(res, 500, e.message);
@@ -1025,6 +1244,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`║  URL:    http://0.0.0.0:${PORT}              ║`);
   console.log(`║  App ID: ${ML_APP_ID}   ║`);
   console.log(`╚════════════════════════════════════════════╝`);
+
+  setTimeout(syncAllStores, 5000); // initial sync 5s after startup
+  setInterval(syncAllStores, 30 * 60_000); // every 30 min
 });
 
 process.on('SIGTERM', () => { db.close(); server.close(() => process.exit(0)); });

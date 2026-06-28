@@ -1134,3 +1134,35 @@ tr:hover td { background: #fafafa; }
   color: var(--text);
 }
 .mt-12 { margin-top: 12px; }
+
+/* ============================================================
+   SYNC BUTTON & STATUS
+   ============================================================ */
+.btn-sync {
+  background: var(--navy);
+  color: var(--yellow);
+  border: 1px solid var(--yellow);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: background var(--transition), color var(--transition);
+  white-space: nowrap;
+}
+.btn-sync:hover {
+  background: var(--yellow);
+  color: var(--navy);
+}
+.btn-sync:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.sync-status {
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
