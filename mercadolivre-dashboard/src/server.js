@@ -309,12 +309,19 @@ route('GET', '/ml/callback', async (req, res) => {
     );
 
     const sess = createSession(String(user.id));
-    // Pass token via URL so frontend can store in localStorage (avoids cookie/proxy issues)
-    res.writeHead(302, {
-      Location: `/?ml_token=${sess}`,
+    // Serve an inline page that saves token to localStorage then redirects
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Entrando...</title></head><body>
+<script>
+try { localStorage.setItem('ml_token','${sess}'); } catch(e){}
+location.replace('/');
+</script>
+<p>Redirecionando...</p></body></html>`;
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
       'Set-Cookie': `ml_state=; HttpOnly; Path=/; Max-Age=0`,
     });
-    res.end();
+    res.end(html);
   } catch (e) {
     console.error('OAuth callback error:', e.message);
     const isRateLimit = e.message.includes('429') || e.message.includes('Rate limit');
