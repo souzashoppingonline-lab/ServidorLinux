@@ -670,13 +670,22 @@ const JOB_HANDLERS = {
 
     let totalEntries = 0;
     let errors = 0;
+    let baseDelay = 3000; // 3s between calls — conservative to avoid 429
     for (let i = 0; i < pending.length; i++) {
-      if (i > 0) await new Promise(r => setTimeout(r, 1200));
+      if (i > 0) await new Promise(r => setTimeout(r, baseDelay));
       const itemId = pending[i];
       const data = await mlFetch(
         `/items/visits/time_window?ids=${itemId}&last=30&unit=day`,
         {}, storeId
-      ).catch(e => { errors++; console.error(`[sync] visits item ${itemId} error:`, e.message); return null; });
+      ).catch(e => {
+        errors++;
+        console.error(`[sync] visits item ${itemId} error:`, e.message);
+        if (e.message.includes('429')) {
+          baseDelay = Math.min(baseDelay * 2, 15000); // back off up to 15s
+          console.log(`[sync] visits 429 — baseDelay aumentado para ${baseDelay}ms`);
+        }
+        return null;
+      });
 
       if (!data) continue;
 
