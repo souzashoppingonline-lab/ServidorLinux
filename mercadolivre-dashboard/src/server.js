@@ -215,8 +215,29 @@ for (const col of [
   "ALTER TABLE listings ADD COLUMN original_price REAL DEFAULT 0",
   "ALTER TABLE listings ADD COLUMN deal_ids TEXT DEFAULT ''",
 ]) {
-  try { db.exec(col); } catch {} // ignore "duplicate column" errors
+  try { db.exec(col); } catch {}
 }
+
+// Reputation table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS reputation (
+      store_id          TEXT PRIMARY KEY,
+      level_id          TEXT DEFAULT '',
+      power_seller_status TEXT DEFAULT '',
+      transactions_total INTEGER DEFAULT 0,
+      transactions_completed INTEGER DEFAULT 0,
+      transactions_canceled INTEGER DEFAULT 0,
+      ratings_positive  INTEGER DEFAULT 0,
+      ratings_negative  INTEGER DEFAULT 0,
+      ratings_neutral   INTEGER DEFAULT 0,
+      metrics_sales_delayed_pct REAL DEFAULT 0,
+      metrics_claims_rate REAL DEFAULT 0,
+      metrics_cancellations_rate REAL DEFAULT 0,
+      synced_at         INTEGER DEFAULT (unixepoch())
+    )
+  `);
+} catch {}
 
 setInterval(() => {
   db.prepare('DELETE FROM cache    WHERE expires_at < unixepoch()').run();
@@ -626,6 +647,46 @@ const JOB_HANDLERS = {
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'promotions', 'ok', '');
     console.log(`[sync] promotions done store=${storeId} count=${promotions.length}`);
   },
+
+  async sync_reputation(storeId) {
+    console.log(`[sync] reputation store=${storeId}`);
+    const data = await mlFetch(`/users/${storeId}`, {}, storeId).catch(e => {
+      console.error('[sync] reputation error:', e.message);
+      return null;
+    });
+    if (!data) return;
+
+    const rep = data.seller_reputation || {};
+    const tx  = rep.transactions || {};
+    const rat = tx.ratings || {};
+    const met = rep.metrics || {};
+
+    db.prepare(`
+      INSERT OR REPLACE INTO reputation(
+        store_id, level_id, power_seller_status,
+        transactions_total, transactions_completed, transactions_canceled,
+        ratings_positive, ratings_negative, ratings_neutral,
+        metrics_sales_delayed_pct, metrics_claims_rate, metrics_cancellations_rate,
+        synced_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,unixepoch())
+    `).run(
+      storeId,
+      rep.level_id || '',
+      rep.power_seller_status || '',
+      tx.total || 0,
+      tx.completed || 0,
+      tx.canceled || 0,
+      rat.positive || 0,
+      rat.negative || 0,
+      rat.neutral || 0,
+      met.sales?.delayed?.rate || 0,
+      met.claims?.rate || 0,
+      met.cancellations?.rate || 0
+    );
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'reputation', 'ok', '');
+    console.log(`[sync] reputation done store=${storeId} level=${rep.level_id}`);
+  },
 };
 
 // ============================================================
@@ -721,6 +782,7 @@ const Scheduler = {
       sync_listings_batch: SCHEDULER_CONFIG.stockInterval / 1000,
       sync_visits:        86400,
       sync_promotions:    14400,
+      sync_reputation:    21600,
     };
     const stuckJobs = db.prepare("SELECT * FROM job_queue WHERE status='running' OR status='pending'").all();
     let rescheduled = 0;
@@ -799,6 +861,11 @@ const Scheduler = {
       const lastP = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='promotions'").get(s.id);
       const promosStale = !lastP || (Date.now()/1000 - lastP.last_sync) > 14400;
       if (promosStale) this.enqueue('sync_promotions', s.id, 3, {}, base + 180000);
+
+      // Sync reputation if never done or stale (> 6h)
+      const lastR = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='reputation'").get(s.id);
+      const repStale = !lastR || (Date.now()/1000 - lastR.last_sync) > 21600;
+      if (repStale) this.enqueue('sync_reputation', s.id, 4, {}, base + 240000);
     });
   },
 
@@ -1370,6 +1437,19 @@ route('GET', '/api/promotions', (req, res, sess) => {
 route('POST', '/api/promotions/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_promotions', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
+});
+
+// ── Reputation ─────────────────────────────────────────────
+route('GET', '/api/reputation', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  const rep = db.prepare('SELECT * FROM reputation WHERE store_id=?').get(storeId);
+  const syncLog = db.prepare("SELECT last_sync,status FROM sync_log WHERE store_id=? AND entity='reputation'").get(storeId);
+  ok(res, { reputation: rep || null, syncLog: syncLog || null });
+});
+
+route('POST', '/api/reputation/sync', (req, res, sess) => {
+  Scheduler.enqueue('sync_reputation', sess.store_id, 2);
+  ok(res, { ok: true, message: 'Sync de reputação enfileirada' });
 });
 
 // ── Messages ───────────────────────────────────────────────
