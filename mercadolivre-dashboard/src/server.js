@@ -661,11 +661,18 @@ const JOB_HANDLERS = {
       return;
     }
 
+    // Track which items already have visit data so we can skip them on resume
+    const doneSet = new Set(
+      db.prepare('SELECT DISTINCT item_id FROM item_visits WHERE store_id=?').all(storeId).map(r => r.item_id)
+    );
+    const pending = allIds.filter(id => !doneSet.has(id));
+    console.log(`[sync] visits store=${storeId} total=${allIds.length} pending=${pending.length} done=${doneSet.size}`);
+
     let totalEntries = 0;
     let errors = 0;
-    for (let i = 0; i < allIds.length; i++) {
-      if (i > 0) await new Promise(r => setTimeout(r, 1500)); // 1.5s between calls
-      const itemId = allIds[i];
+    for (let i = 0; i < pending.length; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 1200));
+      const itemId = pending[i];
       const data = await mlFetch(
         `/items/visits/time_window?ids=${itemId}&last=30&unit=day`,
         {}, storeId
@@ -673,29 +680,40 @@ const JOB_HANDLERS = {
 
       if (!data) continue;
 
-      // Log first item response to verify format
       if (i === 0) {
         console.log(`[sync_visits] first item raw: ${JSON.stringify(data).slice(0, 400)}`);
       }
 
-      // Response can be: { item_id, date_from, date_to, total_visits, visits: [{date, total}] }
-      // or an array wrapping the above
       const item = Array.isArray(data) ? data[0] : data;
-      if (!item) continue;
+      if (!item) {
+        // Insert a zero-placeholder so this item is skipped on resume
+        insert.run(itemId, storeId, new Date().toISOString().split('T')[0], 0);
+        continue;
+      }
 
-      // API returns { results: [{date, total}] } — field is "results" not "visits"
+      // API returns { results: [{date, total}] }
       const visitList = item.results || item.visits || [];
+      if (!visitList.length) {
+        // Placeholder so resume skips it
+        insert.run(itemId, storeId, new Date().toISOString().split('T')[0], 0);
+        continue;
+      }
       db.transaction((rows) => {
         for (const v of rows) {
           const date = (v.date || v.day || '').split('T')[0];
           if (!date) continue;
           const total = v.total || v.visits || 0;
-          if (total > 0) {
-            insert.run(itemId, storeId, date, total);
-            totalEntries++;
-          }
+          insert.run(itemId, storeId, date, total);
+          if (total > 0) totalEntries++;
         }
       })(visitList);
+
+      // Log progress every 10 items
+      if ((i + 1) % 10 === 0) {
+        console.log(`[sync] visits progress ${i + 1}/${pending.length} entries=${totalEntries}`);
+        // Update sync_log so partial progress is visible
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'partial', `${i+1}/${pending.length}`);
+      }
     }
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
@@ -2562,9 +2580,15 @@ route('GET', '/api/ads/campaigns', (req, res, sess) => {
 
 route('POST', '/api/visits/sync', (req, res, sess) => {
   const storeId = qp(req).get('storeId') || (sess && sess.store_id) || '1662123376';
+  const force   = qp(req).get('force') === '1';
+  if (force) {
+    // Full reset: wipe all visit data so sync restarts from scratch
+    db.prepare('DELETE FROM item_visits WHERE store_id=?').run(storeId);
+    console.log(`[visits/sync] force reset item_visits store=${storeId}`);
+  }
   db.prepare("DELETE FROM sync_log WHERE store_id=? AND entity='visits'").run(storeId);
   Scheduler.enqueue('sync_visits', storeId, 2);
-  ok(res, { ok: true, message: 'Sync de visitas enfileirado com prioridade alta' });
+  ok(res, { ok: true, message: force ? 'Sync completo de visitas enfileirado (dados apagados)' : 'Sync de visitas enfileirado — retomará do progresso salvo' });
 }, true);
 
 route('POST', '/api/ads/sync', (req, res, sess) => {
