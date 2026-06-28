@@ -1878,11 +1878,13 @@ route('GET', '/api/debug/ads-live', async (req, res) => {
   try {
     const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
     const safeGet = (path) => Promise.race([mlFetch(path, {}, storeId), timeout(8000)]).catch(e => ({ _error: e.message }));
-    // Try multiple endpoint variants to find which one works
-    const adv1 = await safeGet(`/advertising/advertisers?user_id=${storeId}`);
-    const adv2 = await safeGet(`/advertising/advertisers/${storeId}`);
-    const adv3 = await safeGet(`/users/${storeId}/advertising`);
-    ok(res, { variant1_user_id_param: adv1, variant2_direct: adv2, variant3_users: adv3 });
+    // Try without user_id — token identifies the user
+    const adv1 = await safeGet(`/advertising/advertisers`);
+    // Try product ads (different from brand/display ads)
+    const adv2 = await safeGet(`/advertising/product_ads/sellers/${storeId}`);
+    // Try MLA-style endpoint
+    const adv3 = await safeGet(`/advertising/advertisers?app_version=v2`);
+    ok(res, { noParam: adv1, productAds: adv2, v2: adv3 });
   } catch (e) {
     ok(res, { error: e.message });
   }
