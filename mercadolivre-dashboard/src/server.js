@@ -480,48 +480,51 @@ const JOB_HANDLERS = {
 
   async sync_visits(storeId) {
     console.log(`[sync] visits store=${storeId}`);
-    const now = new Date();
+    // Use /items/visits/time_window?ids=ID1,ID2&last=30&unit=day
+    // This is the correct ML API for multi-day visit data (NOT the per-day endpoint)
+    // It returns daily breakdown per item for the last N days — one call per batch of IDs
+    const today = new Date().toISOString().split('T')[0];
     const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id,store_id,date,visits) VALUES(?,?,?,?)');
 
-    // Sync in weekly buckets (4 calls for 28 days) instead of 31 individual day calls.
-    // ML API returns total_visits for the range; we store with the END date of each bucket
-    // so queries like "WHERE date >= X" work correctly by filtering buckets.
-    const BUCKETS = [
-      { days: 1,  label: 'yesterday' },
-      { days: 7,  label: 'week1' },
-      { days: 14, label: 'week2' },
-      { days: 21, label: 'week3' },
-      { days: 28, label: 'week4' },
-    ];
+    const allIds = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active'").all(storeId).map(r => r.id);
+    if (!allIds.length) {
+      console.log(`[sync] visits store=${storeId} — sem anúncios ativos`);
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
+      return;
+    }
 
-    let totalItems = 0;
-    for (let b = 0; b < BUCKETS.length - 1; b++) {
-      const endMs  = now - BUCKETS[b].days * 86400000;
-      const startMs = now - BUCKETS[b + 1].days * 86400000;
-      const dateFrom = new Date(startMs).toISOString().split('T')[0];
-      const dateTo   = new Date(endMs).toISOString().split('T')[0];
-
-      if (b > 0) await new Promise(r => setTimeout(r, 2000)); // 2s between calls
-
+    let totalEntries = 0;
+    // Process in batches of 20 IDs (ML API limit per call)
+    for (let i = 0; i < allIds.length; i += 20) {
+      if (i > 0) await new Promise(r => setTimeout(r, 2000)); // 2s between batches
+      const ids = allIds.slice(i, i + 20).join(',');
       const data = await mlFetch(
-        `/users/${storeId}/items/visits?date_from=${dateFrom}&date_to=${dateTo}`,
+        `/items/visits/time_window?ids=${ids}&last=30&unit=day`,
         {}, storeId
-      ).catch(e => { console.error(`[sync] visits bucket ${b} error:`, e.message); return null; });
+      ).catch(e => { console.error(`[sync] visits batch ${i} error:`, e.message); return null; });
 
-      if (data?.items_visits?.length) {
-        db.transaction((items) => {
-          for (const item of items) {
-            if (item.id && item.total_visits > 0) {
-              insert.run(item.id, storeId, dateTo, item.total_visits);
+      if (!data) continue;
+
+      // Response: array of { id, visits: [ { date, total } ] }
+      const items = Array.isArray(data) ? data : (data.items_visits || []);
+      db.transaction((rows) => {
+        for (const item of rows) {
+          const itemId = item.id || item.item_id;
+          if (!itemId) continue;
+          const visitList = item.visits || [];
+          for (const v of visitList) {
+            const date = v.date?.split('T')[0] || today;
+            if ((v.total || 0) > 0) {
+              insert.run(itemId, storeId, date, v.total);
+              totalEntries++;
             }
           }
-        })(data.items_visits);
-        totalItems += data.items_visits.length;
-      }
+        }
+      })(items);
     }
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
-    console.log(`[sync] visits done store=${storeId} totalEntries=${totalItems}`);
+    console.log(`[sync] visits done store=${storeId} ids=${allIds.length} entries=${totalEntries}`);
   },
 };
 
