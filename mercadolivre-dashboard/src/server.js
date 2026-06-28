@@ -239,6 +239,59 @@ try {
   `);
 } catch {}
 
+// Ads tables
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ads_campaigns (
+      id           TEXT PRIMARY KEY,
+      store_id     TEXT NOT NULL,
+      name         TEXT DEFAULT '',
+      status       TEXT DEFAULT '',
+      type         TEXT DEFAULT '',
+      daily_budget REAL DEFAULT 0,
+      created_date TEXT DEFAULT '',
+      updated_date TEXT DEFAULT '',
+      synced_at    INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ads_groups (
+      id          TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      store_id    TEXT NOT NULL,
+      name        TEXT DEFAULT '',
+      status      TEXT DEFAULT '',
+      synced_at   INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ads_daily_metrics (
+      date                   TEXT NOT NULL,
+      store_id               TEXT NOT NULL,
+      campaign_id            TEXT DEFAULT '',
+      group_id               TEXT DEFAULT '',
+      item_id                TEXT DEFAULT '',
+      sku                    TEXT DEFAULT '',
+      ad_id                  TEXT NOT NULL,
+      spend                  REAL DEFAULT 0,
+      clicks                 INTEGER DEFAULT 0,
+      impressions            INTEGER DEFAULT 0,
+      conversions            INTEGER DEFAULT 0,
+      attributed_revenue     REAL DEFAULT 0,
+      ctr                    REAL DEFAULT 0,
+      cpc                    REAL DEFAULT 0,
+      cpm                    REAL DEFAULT 0,
+      roas                   REAL DEFAULT 0,
+      acos                   REAL DEFAULT 0,
+      tacos                  REAL DEFAULT 0,
+      cost_per_conversion    REAL DEFAULT 0,
+      revenue_per_click      REAL DEFAULT 0,
+      revenue_per_impression REAL DEFAULT 0,
+      avg_position           REAL DEFAULT 0,
+      synced_at              INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (date, ad_id, store_id)
+    );
+  `);
+} catch {}
+
 setInterval(() => {
   db.prepare('DELETE FROM cache    WHERE expires_at < unixepoch()').run();
   db.prepare('DELETE FROM sessions WHERE expires_at < unixepoch()').run();
@@ -687,6 +740,165 @@ const JOB_HANDLERS = {
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'reputation', 'ok', '');
     console.log(`[sync] reputation done store=${storeId} level=${rep.level_id}`);
   },
+
+  async sync_ads_campaigns(storeId) {
+    console.log(`[sync] ads_campaigns store=${storeId}`);
+    try {
+      // Get advertiser_id
+      const advData = await mlFetch(`/advertising/advertisers?user_id=${storeId}`, {}, storeId).catch(e => {
+        if (e.message.includes('403') || e.message.includes('404')) return null;
+        throw e;
+      });
+      if (!advData) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
+        console.log(`[sync] ads_campaigns store=${storeId} — sem acesso a advertising`);
+        return;
+      }
+      const advertiserId = advData.advertiser_id || advData.id || (Array.isArray(advData) ? advData[0]?.id : null);
+      if (!advertiserId) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
+        return;
+      }
+
+      const campData = await mlFetch(`/advertising/advertisers/${advertiserId}/campaigns?limit=100`, {}, storeId).catch(() => null);
+      const campaigns = campData?.results || campData || [];
+
+      const upsertCampaign = db.prepare(`
+        INSERT OR REPLACE INTO ads_campaigns(id,store_id,name,status,type,daily_budget,created_date,updated_date,synced_at)
+        VALUES(?,?,?,?,?,?,?,?,unixepoch())
+      `);
+
+      db.transaction((rows) => {
+        for (const c of rows) {
+          upsertCampaign.run(
+            String(c.id), storeId,
+            c.name || '', c.status || '', c.type || '',
+            c.daily_budget || 0,
+            c.date_created || c.created_date || '',
+            c.last_updated || c.updated_date || ''
+          );
+        }
+      })(campaigns);
+
+      const upsertGroup = db.prepare(`
+        INSERT OR REPLACE INTO ads_groups(id,campaign_id,store_id,name,status,synced_at)
+        VALUES(?,?,?,?,?,unixepoch())
+      `);
+
+      for (const c of campaigns) {
+        await new Promise(r => setTimeout(r, 1000));
+        const groupData = await mlFetch(`/advertising/advertisers/${advertiserId}/ad_groups?campaign_id=${c.id}&limit=50`, {}, storeId).catch(() => null);
+        const groups = groupData?.results || groupData || [];
+        db.transaction((rows) => {
+          for (const g of rows) {
+            upsertGroup.run(String(g.id), String(c.id), storeId, g.name || '', g.status || '');
+          }
+        })(groups);
+      }
+
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'ok', '');
+      console.log(`[sync] ads_campaigns done store=${storeId} count=${campaigns.length}`);
+    } catch (e) {
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_campaigns', 'error', e.message.slice(0, 500));
+      console.error('[sync] ads_campaigns error:', e.message);
+      throw e;
+    }
+  },
+
+  async sync_ads_metrics(storeId) {
+    console.log(`[sync] ads_metrics store=${storeId}`);
+    try {
+      const advData = await mlFetch(`/advertising/advertisers?user_id=${storeId}`, {}, storeId).catch(e => {
+        if (e.message.includes('403') || e.message.includes('404')) return null;
+        throw e;
+      });
+      if (!advData) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', '');
+        return;
+      }
+      const advertiserId = advData.advertiser_id || advData.id || (Array.isArray(advData) ? advData[0]?.id : null);
+      if (!advertiserId) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', '');
+        return;
+      }
+
+      const upsert = db.prepare(`
+        INSERT OR REPLACE INTO ads_daily_metrics(
+          date,store_id,campaign_id,group_id,item_id,sku,ad_id,
+          spend,clicks,impressions,conversions,attributed_revenue,
+          ctr,cpc,cpm,roas,acos,tacos,cost_per_conversion,revenue_per_click,revenue_per_impression,avg_position,
+          synced_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,unixepoch())
+      `);
+
+      // Sync past 7 days
+      const now = new Date();
+      const yesterday = new Date(now - 86400000);
+      const dateFrom = new Date(now - 7 * 86400000).toISOString().split('T')[0];
+      const dateTo   = yesterday.toISOString().split('T')[0];
+
+      await new Promise(r => setTimeout(r, 1000));
+      const reportData = await mlFetch(
+        `/advertising/advertisers/${advertiserId}/reports/products?date_from=${dateFrom}&date_to=${dateTo}&limit=100`,
+        {}, storeId
+      ).catch(e => {
+        if (e.message.includes('403') || e.message.includes('404')) return null;
+        throw e;
+      });
+
+      if (!reportData) {
+        db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', '');
+        return;
+      }
+
+      const rows = reportData?.results || reportData?.data || (Array.isArray(reportData) ? reportData : []);
+
+      db.transaction((items) => {
+        for (const row of items) {
+          const spend     = row.spend || 0;
+          const clicks    = row.clicks || 0;
+          const imps      = row.impressions || 0;
+          const convs     = row.conversions || 0;
+          const revenue   = row.attributed_revenue || 0;
+          const date      = (row.date || '').split('T')[0];
+
+          // Get total sales for tacos (organic + paid)
+          const totalRevRow = db.prepare(`
+            SELECT SUM(oi.quantity * oi.unit_price) as total
+            FROM order_items oi JOIN orders o ON o.id=oi.order_id
+            WHERE oi.store_id=? AND oi.item_id=? AND o.date_created >= ? AND o.date_created <= ? AND o.status='paid'
+          `).get(storeId, row.item_id || '', date + 'T00:00:00', date + 'T23:59:59');
+          const totalRev = totalRevRow?.total || 0;
+
+          const ctr   = imps > 0 ? (clicks / imps) * 100 : 0;
+          const cpc   = clicks > 0 ? spend / clicks : 0;
+          const cpm   = imps > 0 ? (spend / imps) * 1000 : 0;
+          const roas  = spend > 0 ? revenue / spend : 0;
+          const acos  = revenue > 0 ? (spend / revenue) * 100 : 0;
+          const tacos = totalRev > 0 ? (spend / totalRev) * 100 : 0;
+          const cpc2  = convs > 0 ? spend / convs : 0;
+          const rpc   = clicks > 0 ? revenue / clicks : 0;
+          const rpi   = imps > 0 ? revenue / imps : 0;
+
+          upsert.run(
+            date, storeId,
+            String(row.campaign_id || ''), String(row.group_id || ''),
+            String(row.item_id || ''), String(row.sku || ''), String(row.ad_id || row.item_id || ''),
+            spend, clicks, imps, convs, revenue,
+            ctr, cpc, cpm, roas, acos, tacos, cpc2, rpc, rpi,
+            row.avg_position || 0
+          );
+        }
+      })(rows);
+
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'ok', '');
+      console.log(`[sync] ads_metrics done store=${storeId} rows=${rows.length}`);
+    } catch (e) {
+      db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'ads_metrics', 'error', e.message.slice(0, 500));
+      console.error('[sync] ads_metrics error:', e.message);
+      throw e;
+    }
+  },
 };
 
 // ============================================================
@@ -783,6 +995,8 @@ const Scheduler = {
       sync_visits:        86400,
       sync_promotions:    14400,
       sync_reputation:    21600,
+      sync_ads_campaigns: 1800,
+      sync_ads_metrics:   7200,
     };
     const stuckJobs = db.prepare("SELECT * FROM job_queue WHERE status='running' OR status='pending'").all();
     let rescheduled = 0;
@@ -866,6 +1080,16 @@ const Scheduler = {
       const lastR = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='reputation'").get(s.id);
       const repStale = !lastR || (Date.now()/1000 - lastR.last_sync) > 21600;
       if (repStale) this.enqueue('sync_reputation', s.id, 4, {}, base + 240000);
+
+      // Sync ads campaigns if never done or stale (> 30min)
+      const lastAC = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(s.id);
+      const adsCampStale = !lastAC || (Date.now()/1000 - lastAC.last_sync) > 1800;
+      if (adsCampStale) this.enqueue('sync_ads_campaigns', s.id, 5, {}, base + 360000);
+
+      // Sync ads metrics if never done or stale (> 2h)
+      const lastAM = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(s.id);
+      const adsMetStale = !lastAM || (Date.now()/1000 - lastAM.last_sync) > 7200;
+      if (adsMetStale) this.enqueue('sync_ads_metrics', s.id, 5, {}, base + 420000);
     });
   },
 
@@ -893,6 +1117,11 @@ const Scheduler = {
       }, delay);
     };
     scheduleVisitsDaily();
+
+    // Ads campaigns: every 30 min
+    setInterval(() => this.enqueueForAllStores('sync_ads_campaigns', 5), 1800000);
+    // Ads metrics: every 2h
+    setInterval(() => this.enqueueForAllStores('sync_ads_metrics', 5), 7200000);
   },
 };
 
@@ -1888,6 +2117,159 @@ route('GET', '/api/performance', async (req, res, sess) => {
     console.error('Performance error:', e.message);
     apiErr(res, 500, e.message);
   }
+});
+
+// ── Ads ────────────────────────────────────────────────────
+route('GET', '/api/ads/dashboard', (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const period  = p.get('period') || '7d';
+  const dateParam = p.get('date') || '';
+
+  try {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const yesterdayStr = new Date(now - 86400000).toISOString().split('T')[0];
+
+    let dateFrom, dateTo;
+    if (dateParam) {
+      dateFrom = dateParam;
+      dateTo   = dateParam;
+    } else if (period === 'today') {
+      dateFrom = todayStr;
+      dateTo   = todayStr;
+    } else if (period === 'yesterday') {
+      dateFrom = yesterdayStr;
+      dateTo   = yesterdayStr;
+    } else {
+      const days = period === '15d' ? 15 : period === '30d' ? 30 : 7;
+      dateFrom = new Date(now - days * 86400000).toISOString().split('T')[0];
+      dateTo   = todayStr;
+    }
+
+    const metricsRows = db.prepare(`
+      SELECT campaign_id, ad_id,
+        SUM(spend) as spend, SUM(clicks) as clicks, SUM(impressions) as impressions,
+        SUM(conversions) as conversions, SUM(attributed_revenue) as attributed_revenue
+      FROM ads_daily_metrics
+      WHERE store_id=? AND date >= ? AND date <= ?
+      GROUP BY campaign_id, ad_id
+    `).all(storeId, dateFrom, dateTo);
+
+    const totSpend = metricsRows.reduce((s, r) => s + r.spend, 0);
+    const totClicks = metricsRows.reduce((s, r) => s + r.clicks, 0);
+    const totImps = metricsRows.reduce((s, r) => s + r.impressions, 0);
+    const totConvs = metricsRows.reduce((s, r) => s + r.conversions, 0);
+    const totRev = metricsRows.reduce((s, r) => s + r.attributed_revenue, 0);
+
+    // Total sales (organic + paid) for tacos
+    const totalRevRow = db.prepare(`
+      SELECT SUM(total_amount) as total FROM orders
+      WHERE store_id=? AND date_created >= ? AND date_created <= ? AND status='paid'
+    `).get(storeId, dateFrom + 'T00:00:00', dateTo + 'T23:59:59');
+    const totalOrgRev = totalRevRow?.total || 0;
+
+    const kpis = {
+      spend:              totSpend,
+      clicks:             totClicks,
+      impressions:        totImps,
+      conversions:        totConvs,
+      attributed_revenue: totRev,
+      roas:               totSpend > 0 ? totRev / totSpend : 0,
+      acos:               totRev > 0 ? (totSpend / totRev) * 100 : 0,
+      tacos:              totalOrgRev > 0 ? (totSpend / totalOrgRev) * 100 : 0,
+      ctr:                totImps > 0 ? (totClicks / totImps) * 100 : 0,
+      cpc:                totClicks > 0 ? totSpend / totClicks : 0,
+      cpm:                totImps > 0 ? (totSpend / totImps) * 1000 : 0,
+      cost_per_conversion: totConvs > 0 ? totSpend / totConvs : 0,
+    };
+
+    // By campaign
+    const campRows = db.prepare(`
+      SELECT m.campaign_id,
+        SUM(m.spend) as spend, SUM(m.clicks) as clicks, SUM(m.impressions) as impressions,
+        SUM(m.conversions) as conversions, SUM(m.attributed_revenue) as attributed_revenue
+      FROM ads_daily_metrics m
+      WHERE m.store_id=? AND m.date >= ? AND m.date <= ?
+      GROUP BY m.campaign_id
+      ORDER BY spend DESC
+    `).all(storeId, dateFrom, dateTo);
+
+    const campaigns = db.prepare('SELECT id, name, status FROM ads_campaigns WHERE store_id=?').all(storeId);
+    const campMap = {};
+    campaigns.forEach(c => { campMap[c.id] = c; });
+
+    const by_campaign = campRows.map(r => {
+      const camp = campMap[r.campaign_id] || {};
+      const sp = r.spend || 0;
+      const cl = r.clicks || 0;
+      const im = r.impressions || 0;
+      const rv = r.attributed_revenue || 0;
+      const co = r.conversions || 0;
+
+      // total rev for tacos per campaign (all orders during that period)
+      return {
+        campaign_id: r.campaign_id,
+        name:   camp.name   || r.campaign_id,
+        status: camp.status || '',
+        spend:  sp,
+        clicks: cl,
+        impressions: im,
+        conversions: co,
+        attributed_revenue: rv,
+        roas: sp > 0 ? rv / sp : 0,
+        acos: rv > 0 ? (sp / rv) * 100 : 0,
+        tacos: totalOrgRev > 0 ? (sp / totalOrgRev) * 100 : 0,
+        ctr:  im > 0 ? (cl / im) * 100 : 0,
+        cpc:  cl > 0 ? sp / cl : 0,
+      };
+    });
+
+    // By day
+    const dayRows = db.prepare(`
+      SELECT date,
+        SUM(spend) as spend, SUM(clicks) as clicks, SUM(impressions) as impressions,
+        SUM(conversions) as conversions, SUM(attributed_revenue) as attributed_revenue
+      FROM ads_daily_metrics
+      WHERE store_id=? AND date >= ? AND date <= ?
+      GROUP BY date
+      ORDER BY date ASC
+    `).all(storeId, dateFrom, dateTo);
+
+    const by_day = dayRows.map(r => ({
+      date: r.date,
+      spend: r.spend,
+      clicks: r.clicks,
+      impressions: r.impressions,
+      conversions: r.conversions,
+      attributed_revenue: r.attributed_revenue,
+      roas: r.spend > 0 ? r.attributed_revenue / r.spend : 0,
+    }));
+
+    const syncLog = db.prepare("SELECT last_sync,status FROM sync_log WHERE store_id=? AND entity='ads_metrics'").get(storeId);
+
+    ok(res, { kpis, by_campaign, by_day, syncLog: syncLog || null, period, dateFrom, dateTo });
+  } catch (e) {
+    console.error('Ads dashboard error:', e.message);
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('GET', '/api/ads/campaigns', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  try {
+    const campaigns = db.prepare('SELECT * FROM ads_campaigns WHERE store_id=? ORDER BY name').all(storeId);
+    ok(res, { campaigns });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/ads/sync', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  Scheduler.enqueue('sync_ads_campaigns', storeId, 2);
+  Scheduler.enqueue('sync_ads_metrics', storeId, 2);
+  ok(res, { ok: true, message: 'Sync de Ads enfileirado' });
 });
 
 // ============================================================
