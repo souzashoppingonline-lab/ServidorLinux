@@ -287,7 +287,13 @@ route('GET', '/ml/callback', async (req, res) => {
   try {
     const tokens = await exchangeCode(code);
     const user   = await mlFetch('/users/me', { token: tokens.access_token });
+    console.log('[oauth] user.id:', user.id, 'nickname:', user.nickname, 'thumbnail type:', typeof user.thumbnail);
     const exp    = Math.floor(Date.now() / 1000) + (tokens.expires_in || 21600);
+
+    // ML returns thumbnail as object {picture_url} or as a plain string
+    const thumbUrl = typeof user.thumbnail === 'string'
+      ? user.thumbnail
+      : (user.thumbnail?.picture_url || user.thumbnail?.secure_url || '');
 
     db.prepare(`
       INSERT INTO stores(id,nickname,email,access_token,refresh_token,token_expires_at,site_id,permalink,thumbnail)
@@ -297,9 +303,9 @@ route('GET', '/ml/callback', async (req, res) => {
         access_token=excluded.access_token, refresh_token=excluded.refresh_token,
         token_expires_at=excluded.token_expires_at, permalink=excluded.permalink, thumbnail=excluded.thumbnail
     `).run(
-      String(user.id), user.nickname, user.email || '',
-      tokens.access_token, tokens.refresh_token, exp,
-      user.site_id || 'MLB', user.permalink || '', user.thumbnail || '',
+      String(user.id), user.nickname || '', user.email || '',
+      tokens.access_token, tokens.refresh_token || '', exp,
+      user.site_id || 'MLB', user.permalink || '', thumbUrl,
     );
 
     const sess = createSession(String(user.id));
@@ -313,6 +319,7 @@ route('GET', '/ml/callback', async (req, res) => {
     res.end();
   } catch (e) {
     console.error('OAuth callback error:', e.message);
+    console.error(e.stack);
     res.writeHead(302, { Location: '/login?error=auth_failed' });
     res.end();
   }
