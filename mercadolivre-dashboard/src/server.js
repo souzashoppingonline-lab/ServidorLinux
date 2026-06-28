@@ -173,13 +173,18 @@ function createSession(storeId) {
 }
 
 function getSession(req) {
-  // Accept token from Authorization header (Bearer) or cookie
+  // Accept token from: Authorization header, cookie, or ml_token query param
   let token = null;
   const auth = req.headers['authorization'] || '';
   if (auth.startsWith('Bearer ')) token = auth.slice(7);
   if (!token) {
     const m = (req.headers.cookie || '').match(/ml_session=([a-f0-9]{64})/);
     if (m) token = m[1];
+  }
+  if (!token) {
+    const qs = new URL(req.url, 'http://localhost').searchParams;
+    const t = qs.get('ml_token');
+    if (t && /^[a-f0-9]{64}$/.test(t)) token = t;
   }
   if (!token) return null;
   const sess = db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(token);
