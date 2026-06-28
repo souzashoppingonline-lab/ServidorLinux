@@ -95,21 +95,30 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
     if (!store) throw new Error('Loja não encontrada');
     token = await ensureFreshToken(store);
   }
-  const res = await fetch(`${ML_API}${apiPath}`, {
-    method: opts.method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...opts.headers,
-    },
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`ML API ${res.status}: ${text.slice(0, 200)}`);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(`${ML_API}${apiPath}`, {
+      method: opts.method || 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...opts.headers,
+      },
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    });
+    if (res.status === 429) {
+      const wait = parseInt(res.headers.get('x-ratelimit-reset') || res.headers.get('retry-after') || '5', 10);
+      console.log(`[api] 429 em ${apiPath} — aguardando ${wait}s...`);
+      await new Promise(r => setTimeout(r, Math.min(wait, 30) * 1000));
+      continue;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`ML API ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return res.json();
   }
-  return res.json();
+  throw new Error('ML API 429: rate limit após retries');
 }
 
 async function ensureFreshToken(store) {
@@ -471,8 +480,9 @@ route('GET', '/api/listings', async (req, res, sess) => {
     );
     const allIds = search.results || [];
     let items = [];
-    // ML only allows 20 IDs per request
+    // ML only allows 20 IDs per request — add small delay between chunks
     for (let i = 0; i < allIds.length; i += 20) {
+      if (i > 0) await new Promise(r => setTimeout(r, 300));
       const chunk = allIds.slice(i, i + 20).join(',');
       const batch = await mlFetch(
         `/items?ids=${chunk}&attributes=id,title,price,available_quantity,thumbnail,status,permalink,condition,listing_type_id,sold_quantity,category_id`,
