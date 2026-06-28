@@ -1777,23 +1777,15 @@ route('POST', '/api/promotions/sync', (req, res, sess) => {
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
 });
 
-route('GET', '/api/debug/item', async (req, res) => {
-  const p      = qp(req);
+route('GET', '/api/debug/item', (req, res) => {
+  const p       = qp(req);
   const itemId  = p.get('itemId');
   const storeId = p.get('storeId');
   if (!itemId || !storeId) { apiErr(res, 400, 'itemId e storeId obrigatórios'); return; }
-  try {
-    const single = await mlFetch(`/items/${itemId}`, {}, storeId);
-    const batch  = await mlFetch(`/items?ids=${itemId}&attributes=id,price,original_price,deal_ids,sale_price`, {}, storeId);
-    const inDb   = db.prepare('SELECT id,price,original_price,deal_ids FROM listings WHERE id=? AND store_id=?').get(itemId, storeId);
-    ok(res, {
-      single_original_price: single?.original_price,
-      single_price:          single?.price,
-      single_deal_ids:       single?.deal_ids,
-      batch_result:          batch,
-      in_db:                 inDb,
-    });
-  } catch (e) { apiErr(res, 500, e.message); }
+  const inDb       = db.prepare('SELECT id,title,price,original_price,deal_ids,status FROM listings WHERE id=? AND store_id=?').get(itemId, storeId);
+  const promoItems = db.prepare('SELECT * FROM promotion_items WHERE item_id=? AND store_id=?').all(itemId, storeId);
+  const syncLog    = db.prepare("SELECT * FROM sync_log WHERE store_id=? AND entity='listings'").get(storeId);
+  ok(res, { in_db: inDb, promo_items: promoItems, listings_sync_log: syncLog });
 }, true);
 
 route('GET', '/api/promotions/debug', (req, res) => {
