@@ -1809,6 +1809,20 @@ route('GET', '/api/debug/visits', (req, res) => {
   ok(res, { count, sample, byDate, syncLog, activeListings });
 }, true);
 
+route('GET', '/api/debug/visits-live', async (req, res) => {
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
+  try {
+    const ids = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active' LIMIT 3").all(storeId).map(r => r.id);
+    if (!ids.length) { ok(res, { error: 'sem listings ativos' }); return; }
+    const idsStr = ids.join(',');
+    const data = await mlFetch(`/items/visits/time_window?ids=${idsStr}&last=7&unit=day`, {}, storeId);
+    ok(res, { ids, raw: data, isArray: Array.isArray(data), keys: data && !Array.isArray(data) ? Object.keys(data) : null });
+  } catch (e) {
+    ok(res, { error: e.message });
+  }
+}, true);
+
 route('GET', '/api/promotions/debug', (req, res) => {
   const storeId = qp(req).get('storeId');
   if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
