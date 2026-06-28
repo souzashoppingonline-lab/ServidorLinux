@@ -670,7 +670,8 @@ const JOB_HANDLERS = {
       const item = Array.isArray(data) ? data[0] : data;
       if (!item) continue;
 
-      const visitList = item.visits || [];
+      // API returns { results: [{date, total}] } — field is "results" not "visits"
+      const visitList = item.results || item.visits || [];
       db.transaction((rows) => {
         for (const v of rows) {
           const date = (v.date || v.day || '').split('T')[0];
