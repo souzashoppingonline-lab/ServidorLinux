@@ -148,10 +148,24 @@
 </div>
 
 <script>
-  const p = new URLSearchParams(location.search);
-  if (p.get('error')) {
-    document.getElementById('errorMsg').style.display = 'block';
-  }
+  // If already have a token, verify it and redirect to dashboard
+  (async () => {
+    const token = localStorage.getItem('ml_token');
+    if (token) {
+      try {
+        const r = await fetch('/api/me', { headers: { Authorization: `Bearer ${token}` } });
+        if (r.ok) { location.replace('/'); return; }
+        localStorage.removeItem('ml_token');
+      } catch {}
+    }
+    const p = new URLSearchParams(location.search);
+    const err = p.get('error');
+    if (err) {
+      const msg = document.getElementById('errorMsg');
+      msg.style.display = 'block';
+      if (err === 'rate_limit') msg.textContent = 'Muitas tentativas. Aguarde alguns minutos e tente novamente.';
+    }
+  })();
 </script>
 </body>
 </html>
