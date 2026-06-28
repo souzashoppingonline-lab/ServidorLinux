@@ -638,10 +638,7 @@ const JOB_HANDLERS = {
 
   async sync_visits(storeId) {
     console.log(`[sync] visits store=${storeId}`);
-    // Use /items/visits/time_window?ids=ID1,ID2&last=30&unit=day
-    // This is the correct ML API for multi-day visit data (NOT the per-day endpoint)
-    // It returns daily breakdown per item for the last N days — one call per batch of IDs
-    const today = new Date().toISOString().split('T')[0];
+    // ML API /items/visits/time_window accepts only 1 item per call
     const insert = db.prepare('INSERT OR REPLACE INTO item_visits(item_id,store_id,date,visits) VALUES(?,?,?,?)');
 
     const allIds = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active'").all(storeId).map(r => r.id);
@@ -652,43 +649,43 @@ const JOB_HANDLERS = {
     }
 
     let totalEntries = 0;
-    // Process in batches of 20 IDs (ML API limit per call)
-    for (let i = 0; i < allIds.length; i += 20) {
-      if (i > 0) await new Promise(r => setTimeout(r, 2000)); // 2s between batches
-      const ids = allIds.slice(i, i + 20).join(',');
+    let errors = 0;
+    for (let i = 0; i < allIds.length; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 1500)); // 1.5s between calls
+      const itemId = allIds[i];
       const data = await mlFetch(
-        `/items/visits/time_window?ids=${ids}&last=30&unit=day`,
+        `/items/visits/time_window?ids=${itemId}&last=30&unit=day`,
         {}, storeId
-      ).catch(e => { console.error(`[sync] visits batch ${i} error:`, e.message); return null; });
+      ).catch(e => { errors++; console.error(`[sync] visits item ${itemId} error:`, e.message); return null; });
 
       if (!data) continue;
 
-      // Log response structure for debugging
+      // Log first item response to verify format
       if (i === 0) {
-        const sample = Array.isArray(data) ? data[0] : (data.items_visits || data)[0];
-        console.log(`[sync_visits] batch0 response keys=${Object.keys(data||{}).join(',') || 'array'} sample=${JSON.stringify(sample||data).slice(0,300)}`);
+        console.log(`[sync_visits] first item raw: ${JSON.stringify(data).slice(0, 400)}`);
       }
 
-      // Response: array of { id, visits: [ { date, total } ] }
-      const items = Array.isArray(data) ? data : (data.items_visits || []);
+      // Response can be: { item_id, date_from, date_to, total_visits, visits: [{date, total}] }
+      // or an array wrapping the above
+      const item = Array.isArray(data) ? data[0] : data;
+      if (!item) continue;
+
+      const visitList = item.visits || [];
       db.transaction((rows) => {
-        for (const item of rows) {
-          const itemId = item.id || item.item_id;
-          if (!itemId) continue;
-          const visitList = item.visits || [];
-          for (const v of visitList) {
-            const date = v.date?.split('T')[0] || today;
-            if ((v.total || 0) > 0) {
-              insert.run(itemId, storeId, date, v.total);
-              totalEntries++;
-            }
+        for (const v of rows) {
+          const date = (v.date || v.day || '').split('T')[0];
+          if (!date) continue;
+          const total = v.total || v.visits || 0;
+          if (total > 0) {
+            insert.run(itemId, storeId, date, total);
+            totalEntries++;
           }
         }
-      })(items);
+      })(visitList);
     }
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'visits', 'ok', '');
-    console.log(`[sync] visits done store=${storeId} ids=${allIds.length} entries=${totalEntries}`);
+    console.log(`[sync] visits done store=${storeId} ids=${allIds.length} entries=${totalEntries} errors=${errors}`);
   },
 
   async sync_promotions(storeId) {
@@ -1815,9 +1812,9 @@ route('GET', '/api/debug/visits-live', async (req, res) => {
   try {
     const ids = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active' LIMIT 3").all(storeId).map(r => r.id);
     if (!ids.length) { ok(res, { error: 'sem listings ativos' }); return; }
-    const idsStr = ids.join(',');
-    const data = await mlFetch(`/items/visits/time_window?ids=${idsStr}&last=7&unit=day`, {}, storeId);
-    ok(res, { ids, raw: data, isArray: Array.isArray(data), keys: data && !Array.isArray(data) ? Object.keys(data) : null });
+    // ML API accepts only 1 item per call
+    const data = await mlFetch(`/items/visits/time_window?ids=${ids[0]}&last=7&unit=day`, {}, storeId);
+    ok(res, { tested_id: ids[0], raw: data, isArray: Array.isArray(data), keys: data && !Array.isArray(data) ? Object.keys(data) : null });
   } catch (e) {
     ok(res, { error: e.message });
   }
