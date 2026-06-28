@@ -714,16 +714,43 @@ const Scheduler = {
   },
 
   start() {
-    // On startup: mark any 'running' jobs as failed (they were interrupted by restart)
-    const stuck = db.prepare("UPDATE job_queue SET status='pending', error='Interrompido por restart' WHERE status='running'").run();
-    if (stuck.changes > 0) console.log(`[scheduler] ${stuck.changes} job(s) marcado(s) como pending após restart`);
+    // On startup: reschedule interrupted jobs based on last_sync — don't run immediately
+    const JOB_INTERVALS = {
+      sync_orders:        SCHEDULER_CONFIG.ordersInterval / 1000,
+      sync_questions:     SCHEDULER_CONFIG.questionsInterval / 1000,
+      sync_listings_batch: SCHEDULER_CONFIG.stockInterval / 1000,
+      sync_visits:        86400,
+      sync_promotions:    14400,
+    };
+    const stuckJobs = db.prepare("SELECT * FROM job_queue WHERE status='running' OR status='pending'").all();
+    let rescheduled = 0;
+    const seen = new Set();
+    for (const job of stuckJobs) {
+      const key = `${job.type}:${job.store_id}`;
+      // Deduplicate: keep only first occurrence per type+store
+      if (seen.has(key)) {
+        db.prepare("DELETE FROM job_queue WHERE id=?").run(job.id);
+        continue;
+      }
+      seen.add(key);
 
-    // Clean up duplicate pending jobs left from previous restarts
-    db.prepare(`
-      DELETE FROM job_queue WHERE status='pending' AND id NOT IN (
-        SELECT MIN(id) FROM job_queue WHERE status='pending' GROUP BY type, store_id
-      )
-    `).run();
+      const entity = job.type.replace('sync_', '');
+      const lastSync = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity=?").get(job.store_id, entity);
+      const interval = JOB_INTERVALS[job.type] || 1800;
+      const nowSec = Math.floor(Date.now() / 1000);
+
+      if (lastSync && (nowSec - lastSync.last_sync) < interval) {
+        // Recently synced — delay until next window
+        const nextRun = lastSync.last_sync + interval;
+        const waitMin = Math.round((nextRun - nowSec) / 60);
+        db.prepare("UPDATE job_queue SET status='pending', scheduled_at=?, error='' WHERE id=?").run(nextRun, job.id);
+        console.log(`[scheduler] ${job.type} store=${job.store_id} já sincronizado — próxima execução em ${waitMin}min`);
+        rescheduled++;
+      } else {
+        db.prepare("UPDATE job_queue SET status='pending', scheduled_at=unixepoch(), error='' WHERE id=?").run(job.id);
+      }
+    }
+    if (rescheduled > 0) console.log(`[scheduler] ${rescheduled} job(s) reagendados para próxima janela`);
 
     // Process queue every 10 seconds
     setInterval(() => this.tick().catch(e => console.error('[scheduler] tick error:', e.message)), 10000);
