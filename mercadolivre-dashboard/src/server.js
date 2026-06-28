@@ -1878,13 +1878,13 @@ route('GET', '/api/debug/ads-live', async (req, res) => {
   try {
     const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
     const safeGet = (path) => Promise.race([mlFetch(path, {}, storeId), timeout(8000)]).catch(e => ({ _error: e.message }));
-    // Try without user_id — token identifies the user
-    const adv1 = await safeGet(`/advertising/advertisers`);
-    // Try product ads (different from brand/display ads)
-    const adv2 = await safeGet(`/advertising/product_ads/sellers/${storeId}`);
-    // Try MLA-style endpoint
-    const adv3 = await safeGet(`/advertising/advertisers?app_version=v2`);
-    ok(res, { noParam: adv1, productAds: adv2, v2: adv3 });
+    // ML Ads API requires product_id — it's per-item, not per-account
+    const firstItem = db.prepare("SELECT id FROM listings WHERE store_id=? AND status='active' LIMIT 1").get(storeId);
+    const itemId = firstItem?.id;
+    const adv1 = itemId ? await safeGet(`/advertising/advertisers?product_id=${itemId}`) : { _error: 'no active listing found' };
+    // Also try the clicks/impression stats endpoint directly
+    const adv2 = itemId ? await safeGet(`/advertising/advertisers/${storeId}/product_ads?product_id=${itemId}`) : null;
+    ok(res, { itemTested: itemId, withProductId: adv1, productAdsEndpoint: adv2 });
   } catch (e) {
     ok(res, { error: e.message });
   }
