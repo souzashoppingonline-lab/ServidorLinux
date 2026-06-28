@@ -187,9 +187,15 @@ function createSession(storeId) {
 }
 
 function getSession(req) {
-  const m = (req.headers.cookie || '').match(/ml_session=([a-f0-9]{64})/);
-  if (!m) return null;
-  return db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(m[1]);
+  const cookies = req.headers.cookie || '';
+  const m = cookies.match(/ml_session=([a-f0-9]{64})/);
+  if (!m) {
+    if (cookies) console.log('[session] Cookie presente mas sem ml_session:', cookies.slice(0, 100));
+    return null;
+  }
+  const sess = db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(m[1]);
+  if (!sess) console.log('[session] Token não encontrado no DB:', m[1].slice(0, 16) + '...');
+  return sess;
 }
 
 // ============================================================
