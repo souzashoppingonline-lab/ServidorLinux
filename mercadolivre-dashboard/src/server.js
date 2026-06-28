@@ -2506,12 +2506,11 @@ route('GET', '/api/ads/campaigns', (req, res, sess) => {
 });
 
 route('POST', '/api/visits/sync', (req, res, sess) => {
-  const storeId = qp(req).get('storeId') || sess.store_id;
-  // Force reset the sync_log so scheduleAllSyncs picks it up as stale
+  const storeId = qp(req).get('storeId') || (sess && sess.store_id) || '1662123376';
   db.prepare("DELETE FROM sync_log WHERE store_id=? AND entity='visits'").run(storeId);
   Scheduler.enqueue('sync_visits', storeId, 2);
   ok(res, { ok: true, message: 'Sync de visitas enfileirado com prioridade alta' });
-});
+}, true);
 
 route('POST', '/api/ads/sync', (req, res, sess) => {
   const storeId = qp(req).get('storeId') || sess.store_id;
