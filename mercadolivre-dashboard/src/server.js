@@ -150,30 +150,16 @@ async function exchangeCode(code) {
   });
   console.log('[oauth] Trocando code. redirect_uri:', ML_REDIRECT_URI);
 
-  // Retry with backoff on 429
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) {
-      const wait = attempt * 5000;
-      console.log(`[oauth] Aguardando ${wait}ms antes de retry ${attempt}...`);
-      await new Promise(r => setTimeout(r, wait));
-    }
-    const res = await fetch(ML_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: body.toString(),
-    });
-    const text = await res.text();
-    console.log('[oauth] ML response', res.status, ':', text.slice(0, 300));
-    if (res.status === 429) {
-      const retryAfter = parseInt(res.headers.get('retry-after') || '10', 10);
-      console.log(`[oauth] Rate limit 429 — aguardando ${retryAfter}s...`);
-      await new Promise(r => setTimeout(r, retryAfter * 1000));
-      continue;
-    }
-    if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text.slice(0, 200)}`);
-    return JSON.parse(text);
-  }
-  throw new Error('Troca de código falhou após retries (rate limit ML)');
+  const res = await fetch(ML_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: body.toString(),
+  });
+  const text = await res.text();
+  console.log('[oauth] ML response', res.status, ':', text.slice(0, 300));
+  if (res.status === 429) throw new Error('Rate limit ML (429) — aguarde alguns minutos e tente novamente');
+  if (!res.ok) throw new Error(`Troca de código falhou (${res.status}): ${text.slice(0, 200)}`);
+  return JSON.parse(text);
 }
 
 // ============================================================
@@ -327,8 +313,9 @@ route('GET', '/ml/callback', async (req, res) => {
     res.end();
   } catch (e) {
     console.error('OAuth callback error:', e.message);
-    console.error(e.stack);
-    res.writeHead(302, { Location: '/login?error=auth_failed' });
+    const isRateLimit = e.message.includes('429') || e.message.includes('Rate limit');
+    const errParam = isRateLimit ? 'rate_limit' : 'auth_failed';
+    res.writeHead(302, { Location: `/login?error=${errParam}` });
     res.end();
   }
 }, true);
