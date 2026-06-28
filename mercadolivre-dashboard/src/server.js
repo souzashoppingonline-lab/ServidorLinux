@@ -1873,6 +1873,21 @@ route('GET', '/api/debug/visits', (req, res) => {
   ok(res, { count, sample, byDate, syncLog, activeListings });
 }, true);
 
+route('GET', '/api/debug/ads-live', async (req, res) => {
+  const storeId = qp(req).get('storeId') || '1662123376';
+  try {
+    const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
+    const safeGet = (path) => Promise.race([mlFetch(path, {}, storeId), timeout(8000)]).catch(e => ({ _error: e.message }));
+    const adv = await safeGet(`/advertising/advertisers?user_id=${storeId}`);
+    const advId = adv?.advertiser_id || adv?.id || (Array.isArray(adv) ? adv[0]?.id : null);
+    let camps = null;
+    if (advId) camps = await safeGet(`/advertising/advertisers/${advId}/campaigns?limit=10`);
+    ok(res, { advertiserRaw: adv, advertiserId: advId, campaignsRaw: camps });
+  } catch (e) {
+    ok(res, { error: e.message });
+  }
+}, true);
+
 route('GET', '/api/debug/ads', (req, res) => {
   const storeId = qp(req).get('storeId') || '1662123376';
   try {
