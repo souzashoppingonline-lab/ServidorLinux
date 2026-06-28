@@ -180,7 +180,11 @@ function getSession(req) {
     return null;
   }
   const sess = db.prepare('SELECT * FROM sessions WHERE token=? AND expires_at>unixepoch()').get(m[1]);
-  if (!sess) console.log('[session] Token não encontrado no DB:', m[1].slice(0, 16) + '...');
+  if (!sess) {
+    console.log('[session] Token não encontrado no DB:', m[1].slice(0, 16) + '...');
+  } else {
+    console.log('[session] OK store_id:', sess.store_id);
+  }
   return sess;
 }
 
@@ -346,6 +350,16 @@ route('POST', '/ml/webhook', handleWebhook, true);
 // ML also sends notifications to the same callback URL via POST
 // (when both fields point to the same URL)
 route('POST', '/ml/callback', handleWebhook, true);
+
+// ── Debug (temporary) ──────────────────────────────────────
+route('GET', '/api/debug-session', (req, res) => {
+  const cookies = req.headers.cookie || '';
+  const m = cookies.match(/ml_session=([a-f0-9]{64})/);
+  const token = m ? m[1] : null;
+  const sess = token ? db.prepare('SELECT store_id, datetime(expires_at,"unixepoch") as exp FROM sessions WHERE token=?').get(token) : null;
+  const sessCount = db.prepare('SELECT COUNT(*) as n FROM sessions').get();
+  ok(res, { hasCookie: !!token, tokenPrefix: token ? token.slice(0,16) : null, sessionFound: !!sess, session: sess, totalSessions: sessCount.n });
+}, true);
 
 // ── Stores ─────────────────────────────────────────────────
 route('GET', '/api/stores', (req, res, sess) => {
