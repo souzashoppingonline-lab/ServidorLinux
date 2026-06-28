@@ -718,12 +718,25 @@ const JOB_HANDLERS = {
       ).catch(() => null);
 
       const promoItems = itemsData?.results || itemsData || [];
+      console.log(`[sync] promotions promo=${promo.id} items=${promoItems.length} sample=${JSON.stringify(promoItems[0] || {}).slice(0,200)}`);
+
+      const updateListing = db.prepare(`UPDATE listings SET original_price=? WHERE id=? AND store_id=? AND original_price=0`);
+
       db.transaction((rows) => {
         for (const pi of rows) {
-          const origPrice = pi.original_price || pi.price || 0;
+          // ML returns item_id as the ML item ID (e.g. MLB123456789)
+          // id may be a numeric promo-item ID — always prefer item_id
+          const itemId    = pi.item_id || (typeof pi.id === 'string' && pi.id.startsWith('ML') ? pi.id : null);
+          if (!itemId) continue;
+
+          const origPrice = pi.original_price || pi.regular_price || 0;
           const newPrice  = pi.new_price || pi.sale_price || pi.price || 0;
-          const discPct   = origPrice > 0 ? ((origPrice - newPrice) / origPrice) * 100 : 0;
-          upsertItem.run(String(promo.id), pi.item_id || pi.id, storeId, origPrice, newPrice, discPct);
+          const discPct   = origPrice > 0 && newPrice > 0 ? ((origPrice - newPrice) / origPrice) * 100 : 0;
+
+          upsertItem.run(String(promo.id), itemId, storeId, origPrice, newPrice, discPct);
+
+          // Also stamp original_price on the listing directly so enrichment works even without JOIN
+          if (origPrice > 0) updateListing.run(origPrice, itemId, storeId);
         }
       })(promoItems);
     }
@@ -1536,9 +1549,10 @@ route('GET', '/api/listings', (req, res, sess) => {
     if (items.length) {
       const placeholders = items.map(() => '?').join(',');
       const promoRows = db.prepare(`
-        SELECT pi.item_id, pi.promotion_id, pi.original_price, pi.new_price, pi.discount_pct, p.name, p.type, p.finish_date
+        SELECT pi.item_id, pi.promotion_id, pi.original_price, pi.new_price, pi.discount_pct,
+               p.name, p.type, p.finish_date
         FROM promotion_items pi
-        JOIN promotions p ON p.id = pi.promotion_id AND p.store_id = pi.store_id
+        LEFT JOIN promotions p ON p.id = pi.promotion_id
         WHERE pi.store_id=? AND pi.item_id IN (${placeholders})
       `).all(storeId, ...items.map(i => i.id));
       for (const r of promoRows) {
@@ -1757,6 +1771,15 @@ route('GET', '/api/promotions', (req, res, sess) => {
 route('POST', '/api/promotions/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_promotions', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
+});
+
+route('GET', '/api/promotions/debug', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  const promos     = db.prepare('SELECT * FROM promotions WHERE store_id=? LIMIT 10').all(storeId);
+  const promoItems = db.prepare('SELECT * FROM promotion_items WHERE store_id=? LIMIT 20').all(storeId);
+  const listings   = db.prepare('SELECT id, title, original_price, deal_ids FROM listings WHERE store_id=? AND original_price > 0 LIMIT 20').all(storeId);
+  const totalPromoItems = db.prepare('SELECT COUNT(*) as n FROM promotion_items WHERE store_id=?').get(storeId);
+  ok(res, { promos, promoItems, listingsWithOriginalPrice: listings, totalPromoItems });
 });
 
 // ── Reputation ─────────────────────────────────────────────
