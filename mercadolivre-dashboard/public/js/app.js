@@ -2445,12 +2445,13 @@ async function renderCustomers() {
         const daysSinceLast = c.last_order_at
           ? Math.floor((Date.now() - new Date(c.last_order_at).getTime()) / 86400000)
           : null;
+        const fmtYear = d => d ? new Date(d).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '-';
         const lastTag = daysSinceLast !== null
           ? daysSinceLast <= 30
-            ? `<span style="color:#22c55e;font-weight:600">${fmt.dt(c.last_order_at)}</span>`
+            ? `<span style="color:#22c55e;font-weight:600">${fmtYear(c.last_order_at)}</span>`
             : daysSinceLast <= 90
-              ? `<span style="color:#f59e0b">${fmt.dt(c.last_order_at)}</span>`
-              : `<span style="color:#ef4444">${fmt.dt(c.last_order_at)}</span>`
+              ? `<span style="color:#f59e0b">${fmtYear(c.last_order_at)}</span>`
+              : `<span style="color:#ef4444">${fmtYear(c.last_order_at)}</span>`
           : '-';
 
         const loc = [c.city, c.state_code].filter(Boolean).join(' / ') || '-';
@@ -2462,7 +2463,7 @@ async function renderCustomers() {
               <div style="font-size:11px;color:var(--text-3)">#${c.buyer_id}</div>
             </td>
             <td>${recTag}</td>
-            <td class="td-light">${fmt.dt(c.first_order_at)}</td>
+            <td class="td-light">${fmtYear(c.first_order_at)}</td>
             <td>${lastTag}</td>
             <td class="fw-bold text-right">${fmt.brl(c.total_spent)}</td>
             <td class="text-right">${fmt.num(c.total_orders)}</td>
