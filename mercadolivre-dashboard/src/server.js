@@ -309,10 +309,12 @@ route('GET', '/ml/callback', async (req, res) => {
     );
 
     const sess = createSession(String(user.id));
+    const isHttps = (req.headers['x-forwarded-proto'] || '').includes('https');
+    const secureFlag = isHttps ? '; Secure' : '';
     res.writeHead(302, {
       Location:    '/',
       'Set-Cookie': [
-        `ml_session=${sess}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax`,
+        `ml_session=${sess}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax${secureFlag}`,
         `ml_state=; HttpOnly; Path=/; Max-Age=0`,
       ],
     });
