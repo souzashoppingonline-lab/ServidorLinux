@@ -2456,7 +2456,7 @@ async function renderCustomers() {
         const loc = [c.city, c.state_code].filter(Boolean).join(' / ') || '-';
 
         return `
-          <tr>
+          <tr style="cursor:pointer" onclick="window.openCustomer('${c.buyer_id}','${(c.nickname||c.buyer_id).replace(/'/g,"\\'")}')">
             <td>
               <div style="font-weight:600">${c.nickname || c.buyer_id}</div>
               <div style="font-size:11px;color:var(--text-3)">#${c.buyer_id}</div>
@@ -2560,6 +2560,104 @@ async function renderCustomers() {
 
   await loadCust();
 }
+
+// ============================================================
+// CUSTOMER MODAL
+// ============================================================
+window.openCustomer = async function(buyerId, nickname) {
+  Modal.open(`👤 ${nickname}`, `<div class="loading-state" style="padding:32px"><div class="spinner"></div><p>Carregando...</p></div>`);
+
+  try {
+    const { customer: c, orders } = await API.get(
+      `/api/customers/detail?storeId=${State.currentStore}&buyerId=${buyerId}`
+    );
+
+    const daysSinceLast = c.last_order_at
+      ? Math.floor((Date.now() - new Date(c.last_order_at).getTime()) / 86400000)
+      : null;
+
+    const recTag = c.is_recurrent
+      ? `<span class="badge badge-green">Recorrente</span>`
+      : `<span class="badge badge-blue">Novo</span>`;
+
+    const loc = [c.city, c.state, c.state_code].filter(Boolean);
+    const locStr = loc.length ? loc.filter((v,i,a) => a.indexOf(v) === i).join(', ') : 'Não informado';
+
+    const statusColor = {
+      paid: '#22c55e', pending: '#f59e0b', cancelled: '#ef4444',
+      confirmed: '#3b82f6', in_process: '#3b82f6',
+    };
+
+    const orderRows = orders.map(o => `
+      <tr>
+        <td style="font-size:12px;color:var(--text-2)">#${o.id}</td>
+        <td style="font-size:12px">${fmt.dt(o.date_created)}</td>
+        <td style="font-size:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${o.items||''}">${o.items||'-'}</td>
+        <td style="font-size:12px;text-align:right;font-weight:600">${fmt.brl(o.total_amount)}</td>
+        <td style="font-size:12px">${o.receiver_city ? `${o.receiver_city}/${o.receiver_state_code||''}` : '-'}</td>
+        <td><span style="font-size:11px;font-weight:600;color:${statusColor[o.status]||'#9ca3af'}">${o.status==='paid'?'Pago':o.status}</span></td>
+      </tr>
+    `).join('');
+
+    const body = `
+      <!-- Header info -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:20px">
+        <div style="background:var(--bg);border-radius:10px;padding:16px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Total Gasto</div>
+          <div style="font-size:22px;font-weight:800;color:var(--text)">${fmt.brl(c.total_spent)}</div>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:16px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Pedidos</div>
+          <div style="font-size:22px;font-weight:800;color:var(--text)">${fmt.num(c.total_orders)}</div>
+        </div>
+        <div style="background:var(--bg);border-radius:10px;padding:16px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Ticket Médio</div>
+          <div style="font-size:22px;font-weight:800;color:var(--text)">${fmt.brl(c.avg_ticket)}</div>
+        </div>
+      </div>
+
+      <!-- Customer details -->
+      <div style="background:var(--bg);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:20px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">
+          <div><span style="color:var(--text-2)">Tipo: </span>${recTag}</div>
+          <div><span style="color:var(--text-2)">Localização: </span><strong>${locStr}</strong></div>
+          <div><span style="color:var(--text-2)">Primeira compra: </span><strong>${fmt.dt(c.first_order_at)}</strong></div>
+          <div><span style="color:var(--text-2)">Última compra: </span>
+            <strong style="color:${daysSinceLast<=30?'#22c55e':daysSinceLast<=90?'#f59e0b':'#ef4444'}">
+              ${fmt.dt(c.last_order_at)}${daysSinceLast!==null?` (${daysSinceLast}d atrás)`:''}
+            </strong>
+          </div>
+          <div><span style="color:var(--text-2)">ID ML: </span><span style="font-family:monospace;font-size:12px">#${c.buyer_id}</span></div>
+          <div><span style="color:var(--text-2)">Nickname: </span><strong>${c.nickname||'-'}</strong></div>
+        </div>
+      </div>
+
+      <!-- Orders -->
+      <div style="font-weight:700;font-size:14px;margin-bottom:10px">🛒 Histórico de Compras (${orders.length})</div>
+      <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead style="position:sticky;top:0;background:var(--surface)">
+            <tr>
+              <th style="text-align:left;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">#Pedido</th>
+              <th style="text-align:left;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">Data</th>
+              <th style="text-align:left;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">Produtos</th>
+              <th style="text-align:right;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">Valor</th>
+              <th style="text-align:left;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">Cidade</th>
+              <th style="text-align:left;padding:8px 10px;color:var(--text-2);font-weight:600;border-bottom:1px solid var(--border)">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${orderRows || `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-2)">Nenhuma compra encontrada</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    Modal.open(`👤 ${c.nickname || buyerId}`, body);
+  } catch(e) {
+    Modal.open('Erro', `<p style="color:#ef4444">${e.message}</p>`);
+  }
+};
 
 // ============================================================
 // BOOT

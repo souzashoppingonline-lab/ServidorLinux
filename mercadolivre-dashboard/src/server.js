@@ -1854,6 +1854,35 @@ route('GET', '/api/customers', (req, res, sess) => {
   }
 });
 
+route('GET', '/api/customers/detail', (req, res, sess) => {
+  const p        = qp(req);
+  const storeId  = p.get('storeId') || sess.store_id;
+  const buyerId  = p.get('buyerId');
+  if (!buyerId) { apiErr(res, 400, 'buyerId obrigatório'); return; }
+
+  const customer = db.prepare('SELECT * FROM dim_customers WHERE buyer_id=? AND store_id=?').get(buyerId, storeId);
+  if (!customer) { apiErr(res, 404, 'Cliente não encontrado'); return; }
+
+  const orders = db.prepare(`
+    SELECT o.id, o.date_created, o.date_closed, o.total_amount, o.status, o.shipping_status,
+           o.receiver_city, o.receiver_state, o.receiver_state_code,
+           GROUP_CONCAT(oi.item_title, ' | ') as items,
+           COUNT(oi.id) as item_count,
+           SUM(oi.quantity) as total_qty
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.buyer_id=? AND o.store_id=? AND o.status='paid'
+    GROUP BY o.id
+    ORDER BY o.date_created DESC
+    LIMIT 50
+  `).all(buyerId, storeId);
+
+  // City/state from orders if not in dim_customers
+  const loc = orders.find(o => o.receiver_city);
+
+  ok(res, { customer, orders, loc: loc || null });
+});
+
 route('POST', '/api/customers/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_customers', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de clientes enfileirada' });
