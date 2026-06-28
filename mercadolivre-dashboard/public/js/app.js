@@ -109,6 +109,7 @@ const PAGES = {
   'products-analysis': renderProducts,
   performance:      renderPerformance,
   scheduler:        renderScheduler,
+  ads:              renderAds,
 };
 
 const PAGE_TITLES = {
@@ -124,6 +125,7 @@ const PAGE_TITLES = {
   'products-analysis': 'Ranking de Produtos',
   'performance':    'Performance de Anúncios',
   scheduler:        'Scheduler',
+  ads:              'Publicidade (Mercado Ads)',
 };
 
 function navigate(page) {
@@ -2138,6 +2140,243 @@ window.schedulerCleanup = async () => {
     toast(e.message, 'error');
   }
 };
+
+// ============================================================
+// PAGE: ADS (Mercado Ads)
+// ============================================================
+async function renderAds() {
+  loading();
+  const storeId = State.currentStore;
+  let currentPeriod = 'yesterday';
+  let currentDate = '';
+
+  async function loadAds() {
+    try {
+      const params = currentDate
+        ? `storeId=${storeId}&date=${currentDate}`
+        : `storeId=${storeId}&period=${currentPeriod}`;
+      const data = await API.get(`/api/ads/dashboard?${params}`);
+      const { kpis, by_campaign, by_day, syncLog } = data;
+
+      const hasData = by_campaign.length > 0 || by_day.length > 0;
+
+      const periodBtns = ['today', 'yesterday', '7d', '15d', '30d'];
+      const periodLabels = { today: 'Hoje', yesterday: 'Ontem', '7d': '7 dias', '15d': '15 dias', '30d': '30 dias' };
+
+      function roasColor(v) {
+        if (v >= 3) return 'color:#22c55e;font-weight:600';
+        if (v >= 1) return 'color:#f59e0b;font-weight:600';
+        return 'color:#ef4444;font-weight:600';
+      }
+      function acosColor(v) {
+        if (v > 0 && v < 30) return 'color:#22c55e;font-weight:600';
+        if (v <= 60) return 'color:#f59e0b;font-weight:600';
+        return 'color:#ef4444;font-weight:600';
+      }
+
+      // Totals row for campaign table
+      const totRow = by_campaign.reduce((acc, c) => {
+        acc.spend += c.spend; acc.clicks += c.clicks; acc.impressions += c.impressions;
+        acc.conversions += c.conversions; acc.attributed_revenue += c.attributed_revenue;
+        return acc;
+      }, { spend:0, clicks:0, impressions:0, conversions:0, attributed_revenue:0 });
+      const totRoas = totRow.spend > 0 ? totRow.attributed_revenue / totRow.spend : 0;
+      const totAcos = totRow.attributed_revenue > 0 ? (totRow.spend / totRow.attributed_revenue) * 100 : 0;
+      const totCtr  = totRow.impressions > 0 ? (totRow.clicks / totRow.impressions) * 100 : 0;
+      const totCpc  = totRow.clicks > 0 ? totRow.spend / totRow.clicks : 0;
+
+      // Auto insights
+      const insights = [];
+      by_campaign.forEach(c => {
+        if (c.roas > 5) insights.push({ type: 'success', msg: `<strong>${c.name}</strong> tem ROAS excelente (${c.roas.toFixed(2)}x). Considere aumentar o orçamento.` });
+        if (c.acos > 60 && c.spend > 0) insights.push({ type: 'danger', msg: `<strong>${c.name}</strong> com ACOS elevado (${c.acos.toFixed(1)}%). Revise ou pause esta campanha.` });
+        if (c.ctr < 0.5 && c.impressions > 100) insights.push({ type: 'warning', msg: `<strong>${c.name}</strong> com CTR baixo (${c.ctr.toFixed(2)}%). Revise o criativo do anúncio.` });
+        if (c.conversions > 0 && c.cost_per_conversion !== undefined) {
+          // use spend/conversions
+          const cpconv = c.conversions > 0 ? c.spend / c.conversions : 0;
+          if (cpconv > 50) insights.push({ type: 'warning', msg: `Custo por conversão alto em <strong>${c.name}</strong> (${fmt.brl(cpconv)}).` });
+        }
+      });
+      if (insights.length === 0 && hasData) insights.push({ type: 'info', msg: 'Sem alertas críticos no período. Continue monitorando as campanhas.' });
+
+      const insightsHtml = insights.length > 0
+        ? insights.map(i => `<div style="padding:10px 14px;border-radius:var(--radius-sm);margin-bottom:8px;background:${i.type==='success'?'rgba(34,197,94,.12)':i.type==='danger'?'rgba(239,68,68,.12)':i.type==='warning'?'rgba(245,158,11,.12)':'rgba(99,102,241,.12)'};border-left:3px solid ${i.type==='success'?'#22c55e':i.type==='danger'?'#ef4444':i.type==='warning'?'#f59e0b':'#6366f1'}"><span style="font-size:.9rem">${i.msg}</span></div>`).join('')
+        : '<div style="color:var(--text-muted);font-size:.9rem">Sem dados suficientes para insights.</div>';
+
+      const html = `
+        <div class="page-header">
+          <div>
+            <div class="page-title">📣 Publicidade (Mercado Ads)</div>
+            <div class="page-subtitle">Inteligência de campanhas e métricas de ads</div>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <div style="display:flex;gap:4px">
+              ${periodBtns.map(p => `<button class="btn${currentPeriod===p&&!currentDate?' btn-primary':''}" style="padding:6px 12px;font-size:.8rem" onclick="window.adsSetPeriod('${p}')">${periodLabels[p]}</button>`).join('')}
+            </div>
+            <input type="date" id="adsDatePicker" value="${currentDate}" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:.85rem" onchange="window.adsSetDate(this.value)">
+            <button class="btn" style="padding:6px 12px;font-size:.8rem" onclick="window.adsSync()">⟳ Sincronizar</button>
+          </div>
+        </div>
+
+        ${syncLog ? `<div style="font-size:.8rem;color:var(--text-muted);margin-bottom:12px">Última sync de métricas: ${syncLog.last_sync ? fmt.dt(new Date(syncLog.last_sync * 1000).toISOString()) : 'nunca'} — status: <span style="color:${syncLog.status==='ok'?'#22c55e':'#ef4444'}">${syncLog.status}</span></div>` : ''}
+
+        <!-- KPIs -->
+        <div class="kpi-grid" style="margin-bottom:24px">
+          <div class="kpi-card"><div class="kpi-label">Investimento</div><div class="kpi-value">${fmt.brl(kpis.spend)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Receita Ads</div><div class="kpi-value">${fmt.brl(kpis.attributed_revenue)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">ROAS Médio</div><div class="kpi-value" style="${roasColor(kpis.roas)}">${(kpis.roas||0).toFixed(2)}x</div></div>
+          <div class="kpi-card"><div class="kpi-label">ACOS Médio</div><div class="kpi-value" style="${acosColor(kpis.acos)}">${fmt.pct(kpis.acos)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">CTR Médio</div><div class="kpi-value">${fmt.pct(kpis.ctr)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Cliques</div><div class="kpi-value">${fmt.num(kpis.clicks)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Impressões</div><div class="kpi-value">${fmt.num(kpis.impressions)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Conversões</div><div class="kpi-value">${fmt.num(kpis.conversions)}</div></div>
+          <div class="kpi-card"><div class="kpi-label">CPC Médio</div><div class="kpi-value">${fmt.brl(kpis.cpc)}</div></div>
+        </div>
+
+        <!-- Campaign Table -->
+        <div class="card" style="margin-bottom:24px">
+          <div class="card-title">Campanhas</div>
+          ${!hasData ? `
+            <div class="empty-state" style="padding:40px">
+              <div class="empty-state-icon">📣</div>
+              <h3>Sem dados de campanhas</h3>
+              <p>Clique em Sincronizar para importar os dados de publicidade.</p>
+              <button class="btn btn-primary" onclick="window.adsSync()">⟳ Sincronizar agora</button>
+            </div>
+          ` : `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Campanha</th>
+                    <th>Status</th>
+                    <th>Investimento</th>
+                    <th>Receita</th>
+                    <th>ROAS</th>
+                    <th>ACOS</th>
+                    <th>CTR</th>
+                    <th>CPC</th>
+                    <th>Cliques</th>
+                    <th>Impressões</th>
+                    <th>Conversões</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${by_campaign.map(c => `
+                    <tr>
+                      <td style="font-weight:500">${c.name || c.campaign_id}</td>
+                      <td><span class="badge ${c.status==='active'?'badge-green':c.status==='paused'?'badge-yellow':'badge-gray'}">${c.status||'-'}</span></td>
+                      <td>${fmt.brl(c.spend)}</td>
+                      <td>${fmt.brl(c.attributed_revenue)}</td>
+                      <td style="${roasColor(c.roas)}">${(c.roas||0).toFixed(2)}x</td>
+                      <td style="${acosColor(c.acos)}">${fmt.pct(c.acos)}</td>
+                      <td>${fmt.pct(c.ctr)}</td>
+                      <td>${fmt.brl(c.cpc)}</td>
+                      <td>${fmt.num(c.clicks)}</td>
+                      <td>${fmt.num(c.impressions)}</td>
+                      <td>${fmt.num(c.conversions)}</td>
+                    </tr>
+                  `).join('')}
+                  <tr style="font-weight:700;border-top:2px solid var(--border);background:var(--bg)">
+                    <td>TOTAL</td>
+                    <td>—</td>
+                    <td>${fmt.brl(totRow.spend)}</td>
+                    <td>${fmt.brl(totRow.attributed_revenue)}</td>
+                    <td style="${roasColor(totRoas)}">${totRoas.toFixed(2)}x</td>
+                    <td style="${acosColor(totAcos)}">${fmt.pct(totAcos)}</td>
+                    <td>${fmt.pct(totCtr)}</td>
+                    <td>${fmt.brl(totCpc)}</td>
+                    <td>${fmt.num(totRow.clicks)}</td>
+                    <td>${fmt.num(totRow.impressions)}</td>
+                    <td>${fmt.num(totRow.conversions)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          `}
+        </div>
+
+        <!-- Daily trend chart -->
+        <div class="card" style="margin-bottom:24px">
+          <div class="card-title">Tendência Diária</div>
+          ${by_day.length === 0 ? '<div style="color:var(--text-muted);padding:20px;text-align:center">Sem dados para o período selecionado.</div>' : `<canvas id="adsDailyChart" height="80"></canvas>`}
+        </div>
+
+        <!-- Auto insights -->
+        <div class="card">
+          <div class="card-title">💡 Insights Automáticos</div>
+          <div style="margin-top:8px">${insightsHtml}</div>
+        </div>
+      `;
+
+      setContent(html);
+
+      // Render chart
+      if (by_day.length > 0) {
+        const ctx = document.getElementById('adsDailyChart');
+        if (ctx) {
+          destroyCharts();
+          State.charts.adsDaily = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: by_day.map(d => d.date),
+              datasets: [
+                {
+                  label: 'Investimento (R$)',
+                  data: by_day.map(d => d.spend),
+                  borderColor: '#ef4444',
+                  backgroundColor: 'rgba(239,68,68,.08)',
+                  tension: 0.3,
+                  yAxisID: 'y',
+                },
+                {
+                  label: 'Receita Ads (R$)',
+                  data: by_day.map(d => d.attributed_revenue),
+                  borderColor: '#22c55e',
+                  backgroundColor: 'rgba(34,197,94,.08)',
+                  tension: 0.3,
+                  yAxisID: 'y',
+                },
+              ],
+            },
+            options: {
+              responsive: true,
+              interaction: { mode: 'index', intersect: false },
+              plugins: { legend: { position: 'top' } },
+              scales: {
+                y: { ticks: { callback: v => 'R$' + fmt.num(v) } },
+              },
+            },
+          });
+        }
+      }
+    } catch (e) {
+      setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro ao carregar Ads</h3><p>${e.message}</p><button class="btn btn-primary" onclick="window.adsSync()">⟳ Sincronizar</button></div>`);
+    }
+  }
+
+  window.adsSetPeriod = (p) => {
+    currentPeriod = p;
+    currentDate = '';
+    loadAds();
+  };
+  window.adsSetDate = (d) => {
+    currentDate = d;
+    currentPeriod = '';
+    loadAds();
+  };
+  window.adsSync = async () => {
+    try {
+      toast('Sincronizando Ads...', 'default');
+      await API.post(`/api/ads/sync?storeId=${State.currentStore}`, {});
+      toast('Sync enfileirado! Aguarde alguns instantes.', 'success');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+
+  await loadAds();
+}
 
 // ============================================================
 // BOOT
