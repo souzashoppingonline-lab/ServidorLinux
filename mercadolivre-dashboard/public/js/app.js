@@ -110,6 +110,7 @@ const PAGES = {
   performance:      renderPerformance,
   scheduler:        renderScheduler,
   ads:              renderAds,
+  customers:        renderCustomers,
 };
 
 const PAGE_TITLES = {
@@ -126,6 +127,7 @@ const PAGE_TITLES = {
   'performance':    'Performance de Anúncios',
   scheduler:        'Scheduler',
   ads:              'Publicidade (Mercado Ads)',
+  customers:        'Clientes',
 };
 
 function navigate(page) {
@@ -2376,6 +2378,187 @@ async function renderAds() {
   };
 
   await loadAds();
+}
+
+// ============================================================
+// PAGE: CUSTOMERS
+// ============================================================
+let custState = { filter: 'all', sort: 'total_spent', order: 'desc', search: '', offset: 0, limit: 50, total: 0 };
+
+async function renderCustomers() {
+  setContent(`
+    <div class="page-header">
+      <div>
+        <div class="page-title">Clientes</div>
+        <div class="page-subtitle">Base de compradores e análise de recorrência</div>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="window.custSync()">⟳ Sincronizar</button>
+    </div>
+    <div class="loading-state"><div class="spinner"></div><p>Carregando clientes...</p></div>
+  `);
+
+  window.custSync = async () => {
+    toast('Sincronizando clientes...', 'default');
+    try {
+      await API.post('/api/customers/sync');
+      toast('Sync enfileirado — aguarde alguns instantes', 'success');
+      setTimeout(() => loadCust(), 3000);
+    } catch (e) { toast(e.message, 'error'); }
+  };
+
+  window.custSetFilter = (f) => { custState.filter = f; custState.offset = 0; loadCust(); };
+  window.custSearch    = (v) => { custState.search = v; custState.offset = 0; loadCust(); };
+  window.custSort      = (col) => {
+    if (custState.sort === col) custState.order = custState.order === 'desc' ? 'asc' : 'desc';
+    else { custState.sort = col; custState.order = 'desc'; }
+    loadCust();
+  };
+  window.custPage = (dir) => {
+    custState.offset = Math.max(0, custState.offset + dir * custState.limit);
+    loadCust();
+  };
+
+  async function loadCust() {
+    try {
+      const { customers, total, stats, syncLog } = await API.get(
+        `/api/customers?storeId=${State.currentStore}&filter=${custState.filter}&sort=${custState.sort}&order=${custState.order}&search=${encodeURIComponent(custState.search)}&limit=${custState.limit}&offset=${custState.offset}`
+      );
+      custState.total = total;
+
+      const syncInfo = syncLog
+        ? `Última sync: ${fmt.dt(new Date(syncLog.last_sync * 1000).toISOString())}`
+        : 'Nunca sincronizado';
+
+      const filterBtn = (val, label) => {
+        const active = custState.filter === val;
+        return `<button class="btn btn-sm ${active ? 'btn-primary' : 'btn-secondary'}" onclick="custSetFilter('${val}')">${label}</button>`;
+      };
+
+      const sortIcon = (col) => custState.sort === col ? (custState.order === 'desc' ? ' ▼' : ' ▲') : '';
+      const th = (col, label) => `<th style="cursor:pointer" onclick="custSort('${col}')">${label}${sortIcon(col)}</th>`;
+
+      const rows = customers.map(c => {
+        const recTag = c.is_recurrent
+          ? `<span class="badge badge-green">Recorrente</span>`
+          : `<span class="badge badge-blue">Novo</span>`;
+
+        const daysSinceLast = c.last_order_at
+          ? Math.floor((Date.now() - new Date(c.last_order_at).getTime()) / 86400000)
+          : null;
+        const lastTag = daysSinceLast !== null
+          ? daysSinceLast <= 30
+            ? `<span style="color:#22c55e;font-weight:600">${fmt.dt(c.last_order_at)}</span>`
+            : daysSinceLast <= 90
+              ? `<span style="color:#f59e0b">${fmt.dt(c.last_order_at)}</span>`
+              : `<span style="color:#ef4444">${fmt.dt(c.last_order_at)}</span>`
+          : '-';
+
+        const loc = [c.city, c.state_code].filter(Boolean).join(' / ') || '-';
+
+        return `
+          <tr>
+            <td>
+              <div style="font-weight:600">${c.nickname || c.buyer_id}</div>
+              <div style="font-size:11px;color:var(--text-3)">#${c.buyer_id}</div>
+            </td>
+            <td>${recTag}</td>
+            <td class="td-light">${fmt.dt(c.first_order_at)}</td>
+            <td>${lastTag}</td>
+            <td class="fw-bold text-right">${fmt.brl(c.total_spent)}</td>
+            <td class="text-right">${fmt.num(c.total_orders)}</td>
+            <td class="td-light">${fmt.brl(c.avg_ticket)}</td>
+            <td class="td-light">${loc}</td>
+          </tr>
+        `;
+      }).join('');
+
+      const totalPages = Math.ceil(custState.total / custState.limit);
+      const curPage    = Math.floor(custState.offset / custState.limit) + 1;
+
+      setContent(`
+        <div class="page-header">
+          <div>
+            <div class="page-title">Clientes</div>
+            <div class="page-subtitle">Base de compradores e análise de recorrência · ${syncInfo}</div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="window.custSync()">⟳ Sincronizar</button>
+        </div>
+
+        <!-- KPI cards -->
+        <div class="kpi-grid" style="--cols:5">
+          ${kpiCard('Total de Clientes', fmt.num(stats.total_customers), 'Compradores únicos', '👥', '#3b82f6')}
+          ${kpiCard('Recorrentes', fmt.num(stats.recurrent), `${stats.total_customers > 0 ? ((stats.recurrent/stats.total_customers)*100).toFixed(1) : 0}% da base`, '🔄', '#10b981')}
+          ${kpiCard('Novos (1 compra)', fmt.num(stats.new_customers), 'Apenas uma compra', '🆕', '#f59e0b')}
+          ${kpiCard('Ticket Médio', fmt.brl(stats.avg_ticket), 'Por pedido', '🎫', '#8b5cf6')}
+          ${kpiCard('Gasto Médio / Cliente', fmt.brl(stats.avg_spent), 'Total acumulado', '💰', '#FFE600')}
+        </div>
+
+        <!-- Filters -->
+        <div class="card" style="padding:16px">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <div style="display:flex;gap:6px">
+              ${filterBtn('all', 'Todos')}
+              ${filterBtn('recurrent', '🔄 Recorrentes')}
+              ${filterBtn('new', '🆕 Novos')}
+            </div>
+            <input
+              type="text"
+              class="store-select"
+              placeholder="🔍 Buscar por nome, cidade ou estado..."
+              value="${custState.search}"
+              oninput="custSearch(this.value)"
+              style="flex:1;min-width:220px;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);color:var(--text);font-size:13px"
+            >
+            <span style="font-size:13px;color:var(--text-2)">${fmt.num(total)} cliente${total !== 1 ? 's' : ''}</span>
+          </div>
+        </div>
+
+        <!-- Table -->
+        <div class="card">
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  ${th('nickname', 'Cliente')}
+                  <th>Tipo</th>
+                  ${th('first_order_at', 'Primeira Compra')}
+                  ${th('last_order_at', 'Última Compra')}
+                  ${th('total_spent', 'Total Gasto')}
+                  ${th('total_orders', 'Pedidos')}
+                  ${th('avg_ticket', 'Ticket Médio')}
+                  <th>Localização</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${customers.length ? rows : `<tr><td colspan="8" class="text-center td-light" style="padding:48px">
+                  <div style="font-size:32px;margin-bottom:12px">👥</div>
+                  <div style="font-weight:600;margin-bottom:8px">Nenhum cliente encontrado</div>
+                  <div style="font-size:13px;margin-bottom:16px">Clique em Sincronizar para processar os pedidos existentes.</div>
+                  <button class="btn btn-primary" onclick="window.custSync()">⟳ Sincronizar Agora</button>
+                </td></tr>`}
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination -->
+          ${totalPages > 1 ? `
+          <div style="display:flex;align-items:center;justify-content:space-between;padding-top:16px;font-size:13px;color:var(--text-2)">
+            <span>Página ${curPage} de ${totalPages}</span>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-secondary btn-sm" onclick="custPage(-1)" ${curPage <= 1 ? 'disabled' : ''}>← Anterior</button>
+              <button class="btn btn-secondary btn-sm" onclick="custPage(1)"  ${curPage >= totalPages ? 'disabled' : ''}>Próxima →</button>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      `);
+
+    } catch (e) {
+      setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro ao carregar</h3><p>${e.message}</p><button class="btn btn-primary" onclick="window.custSync()">⟳ Sincronizar</button></div>`);
+    }
+  }
+
+  await loadCust();
 }
 
 // ============================================================

@@ -239,6 +239,36 @@ try {
   `);
 } catch {}
 
+// Dimensional model — dim_customers
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dim_customers (
+      buyer_id       TEXT NOT NULL,
+      store_id       TEXT NOT NULL,
+      nickname       TEXT DEFAULT '',
+      city           TEXT DEFAULT '',
+      state          TEXT DEFAULT '',
+      state_code     TEXT DEFAULT '',
+      country        TEXT DEFAULT 'BR',
+      first_order_at TEXT DEFAULT '',
+      last_order_at  TEXT DEFAULT '',
+      total_orders   INTEGER DEFAULT 0,
+      total_spent    REAL DEFAULT 0,
+      avg_ticket     REAL DEFAULT 0,
+      is_recurrent   INTEGER DEFAULT 0,
+      synced_at      INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (buyer_id, store_id)
+    )
+  `);
+} catch {}
+
+// Shipping address column on orders (migration)
+for (const col of [
+  "ALTER TABLE orders ADD COLUMN receiver_city TEXT DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN receiver_state TEXT DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN receiver_state_code TEXT DEFAULT ''",
+]) { try { db.exec(col); } catch {} }
+
 // Ads tables
 try {
   db.exec(`
@@ -511,13 +541,20 @@ const JOB_HANDLERS = {
       );
       if (!page?.results?.length) break;
 
-      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status) VALUES(?,?,?,?,?,?,?,?,?)`);
+      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id) VALUES(?,?,?,?,?,?,?)`);
 
       db.transaction((orders) => {
         for (const o of orders) {
-          insertOrder.run(o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed, String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'');
+          const addr = o.shipping?.receiver_address || {};
+          insertOrder.run(
+            o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
+            String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'',
+            addr.city?.name || addr.city || '',
+            addr.state?.name || addr.state || '',
+            addr.state?.id || addr.state_code || ''
+          );
           deleteItems.run(o.id);
           for (const item of (o.order_items||[])) {
             insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'');
@@ -739,6 +776,51 @@ const JOB_HANDLERS = {
 
     db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'reputation', 'ok', '');
     console.log(`[sync] reputation done store=${storeId} level=${rep.level_id}`);
+  },
+
+  sync_customers(storeId) {
+    console.log(`[sync] customers store=${storeId}`);
+
+    // Aggregate dim_customers from orders — pure SQL, no API calls needed
+    const rows = db.prepare(`
+      SELECT
+        o.buyer_id,
+        o.buyer_nickname AS nickname,
+        MAX(o.receiver_city)       AS city,
+        MAX(o.receiver_state)      AS state,
+        MAX(o.receiver_state_code) AS state_code,
+        MIN(o.date_created) AS first_order_at,
+        MAX(o.date_created) AS last_order_at,
+        COUNT(*)            AS total_orders,
+        SUM(o.total_amount) AS total_spent
+      FROM orders o
+      WHERE o.store_id=? AND o.buyer_id != '' AND o.status='paid'
+      GROUP BY o.buyer_id
+    `).all(storeId);
+
+    const upsert = db.prepare(`
+      INSERT OR REPLACE INTO dim_customers(
+        buyer_id, store_id, nickname, city, state, state_code,
+        first_order_at, last_order_at,
+        total_orders, total_spent, avg_ticket, is_recurrent, synced_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,unixepoch())
+    `);
+
+    db.transaction((customers) => {
+      for (const c of customers) {
+        const avg = c.total_orders > 0 ? (c.total_spent / c.total_orders) : 0;
+        upsert.run(
+          c.buyer_id, storeId,
+          c.nickname || '', c.city || '', c.state || '', c.state_code || '',
+          c.first_order_at || '', c.last_order_at || '',
+          c.total_orders, c.total_spent, avg,
+          c.total_orders > 1 ? 1 : 0
+        );
+      }
+    })(rows);
+
+    db.prepare('INSERT OR REPLACE INTO sync_log(store_id,entity,last_sync,status,error) VALUES(?,?,unixepoch(),?,?)').run(storeId, 'customers', 'ok', '');
+    console.log(`[sync] customers done store=${storeId} count=${rows.length}`);
   },
 
   async sync_ads_campaigns(storeId) {
@@ -995,6 +1077,7 @@ const Scheduler = {
       sync_visits:        86400,
       sync_promotions:    14400,
       sync_reputation:    21600,
+      sync_customers:     3600,
       sync_ads_campaigns: 1800,
       sync_ads_metrics:   7200,
     };
@@ -1081,6 +1164,11 @@ const Scheduler = {
       const repStale = !lastR || (Date.now()/1000 - lastR.last_sync) > 21600;
       if (repStale) this.enqueue('sync_reputation', s.id, 4, {}, base + 240000);
 
+      // Sync customers dimension if never done or stale (> 1h) — runs after orders
+      const lastCust = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='customers'").get(s.id);
+      const custStale = !lastCust || (Date.now()/1000 - lastCust.last_sync) > 3600;
+      if (custStale) this.enqueue('sync_customers', s.id, 5, {}, base + 300000);
+
       // Sync ads campaigns if never done or stale (> 30min)
       const lastAC = db.prepare("SELECT last_sync FROM sync_log WHERE store_id=? AND entity='ads_campaigns'").get(s.id);
       const adsCampStale = !lastAC || (Date.now()/1000 - lastAC.last_sync) > 1800;
@@ -1117,6 +1205,9 @@ const Scheduler = {
       }, delay);
     };
     scheduleVisitsDaily();
+
+    // Customers dimension: every 1h (after orders sync)
+    setInterval(() => this.enqueueForAllStores('sync_customers', 5), 3600000);
 
     // Ads campaigns: every 30 min
     setInterval(() => this.enqueueForAllStores('sync_ads_campaigns', 5), 1800000);
@@ -1679,6 +1770,53 @@ route('GET', '/api/reputation', (req, res, sess) => {
 route('POST', '/api/reputation/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_reputation', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de reputação enfileirada' });
+});
+
+// ── Customers ──────────────────────────────────────────────
+route('GET', '/api/customers', (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const search  = p.get('search') || '';
+  const filter  = p.get('filter') || 'all'; // all | recurrent | new
+  const sort    = p.get('sort') || 'total_spent';
+  const order   = p.get('order') === 'asc' ? 'ASC' : 'DESC';
+  const limit   = Math.min(parseInt(p.get('limit') || '50'), 200);
+  const offset  = parseInt(p.get('offset') || '0');
+
+  const allowed = ['total_spent','total_orders','last_order_at','first_order_at','avg_ticket'];
+  const sortCol = allowed.includes(sort) ? sort : 'total_spent';
+
+  let where = 'store_id=?';
+  const args = [storeId];
+  if (search) { where += ' AND (nickname LIKE ? OR city LIKE ? OR state LIKE ?)'; args.push(`%${search}%`, `%${search}%`, `%${search}%`); }
+  if (filter === 'recurrent') { where += ' AND is_recurrent=1'; }
+  if (filter === 'new')       { where += ' AND total_orders=1'; }
+
+  try {
+    const total = db.prepare(`SELECT COUNT(*) as n FROM dim_customers WHERE ${where}`).get(...args).n;
+    const rows  = db.prepare(`SELECT * FROM dim_customers WHERE ${where} ORDER BY ${sortCol} ${order} LIMIT ? OFFSET ?`).all(...args, limit, offset);
+
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) as total_customers,
+        SUM(CASE WHEN is_recurrent=1 THEN 1 ELSE 0 END) as recurrent,
+        SUM(CASE WHEN total_orders=1 THEN 1 ELSE 0 END) as new_customers,
+        AVG(total_spent) as avg_spent,
+        AVG(avg_ticket) as avg_ticket
+      FROM dim_customers WHERE store_id=?
+    `).get(storeId);
+
+    const syncLog = db.prepare("SELECT last_sync,status FROM sync_log WHERE store_id=? AND entity='customers'").get(storeId);
+
+    ok(res, { customers: rows, total, stats: stats || {}, syncLog: syncLog || null });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/customers/sync', (req, res, sess) => {
+  Scheduler.enqueue('sync_customers', sess.store_id, 2);
+  ok(res, { ok: true, message: 'Sync de clientes enfileirada' });
 });
 
 // ── Messages ───────────────────────────────────────────────
