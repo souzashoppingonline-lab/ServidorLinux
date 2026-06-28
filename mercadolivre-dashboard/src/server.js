@@ -469,14 +469,16 @@ route('GET', '/api/listings', async (req, res, sess) => {
       `/users/${storeId}/items/search?status=${encodeURIComponent(status)}&limit=${limit}&offset=${offset}`,
       {}, storeId,
     );
-    const ids = (search.results || []).join(',');
+    const allIds = search.results || [];
     let items = [];
-    if (ids) {
+    // ML only allows 20 IDs per request
+    for (let i = 0; i < allIds.length; i += 20) {
+      const chunk = allIds.slice(i, i + 20).join(',');
       const batch = await mlFetch(
-        `/items?ids=${ids}&attributes=id,title,price,available_quantity,thumbnail,status,permalink,condition,listing_type_id,sold_quantity,category_id`,
+        `/items?ids=${chunk}&attributes=id,title,price,available_quantity,thumbnail,status,permalink,condition,listing_type_id,sold_quantity,category_id`,
         {}, storeId,
       );
-      items = (batch || []).map(d => d.body || d).filter(i => i && i.id);
+      items = items.concat((batch || []).map(d => d.body || d).filter(i => i && i.id));
     }
     ok(res, { items, total: search.paging?.total || 0, limit, offset });
   } catch (e) {
