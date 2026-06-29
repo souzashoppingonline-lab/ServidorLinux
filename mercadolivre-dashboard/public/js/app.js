@@ -3493,21 +3493,19 @@ async function renderMonitor() {
     return;
   }
 
-  const toggle = (key, label, desc = '') => `
-    <label style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer">
+  const toggle = (key, label, desc = '') => {
+    const on = !!cfg[key];
+    return `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.06)">
       <div>
         <div style="font-weight:500">${label}</div>
         ${desc ? `<div style="font-size:12px;color:#888;margin-top:2px">${desc}</div>` : ''}
       </div>
-      <div class="toggle-wrap" style="position:relative;width:42px;height:22px;flex-shrink:0;margin-left:16px">
-        <input type="checkbox" id="tog_${key}" ${cfg[key] ? 'checked' : ''} onchange="monitorSave()"
-          style="opacity:0;width:0;height:0;position:absolute">
-        <span onclick="document.getElementById('tog_${key}').click()"
-          style="position:absolute;inset:0;border-radius:22px;background:${cfg[key] ? '#FFE600' : '#444'};transition:.2s;cursor:pointer">
-          <span style="position:absolute;left:${cfg[key] ? '22px' : '2px'};top:2px;width:18px;height:18px;border-radius:50%;background:#111;transition:.2s"></span>
-        </span>
+      <div id="tw_${key}" onclick="monitorToggle('${key}')" style="position:relative;width:42px;height:22px;flex-shrink:0;margin-left:16px;cursor:pointer;border-radius:22px;background:${on ? '#FFE600' : '#444'};transition:background .2s">
+        <div id="tk_${key}" style="position:absolute;top:2px;left:${on ? '22px' : '2px'};width:18px;height:18px;border-radius:50%;background:#111;transition:left .2s"></div>
+        <input type="checkbox" id="tog_${key}" ${on ? 'checked' : ''} style="display:none">
       </div>
-    </label>`;
+    </div>`; };
 
   const q = status.scheduler;
   const p = status.processo;
@@ -3662,15 +3660,18 @@ async function renderMonitor() {
     </p>`;
 }
 
+window.monitorToggle = function(key) {
+  const cb  = document.getElementById('tog_' + key);
+  const wrap = document.getElementById('tw_'  + key);
+  const knob = document.getElementById('tk_'  + key);
+  if (!cb) return;
+  cb.checked = !cb.checked;
+  if (wrap) wrap.style.background = cb.checked ? '#FFE600' : '#444';
+  if (knob) knob.style.left = cb.checked ? '22px' : '2px';
+  monitorSave();
+};
+
 window.monitorSave = async function() {
-  // Atualiza toggles visualmente
-  document.querySelectorAll('[id^="tog_"]').forEach(el => {
-    const span = el.nextElementSibling;
-    if (span) {
-      span.style.background = el.checked ? '#FFE600' : '#444';
-      span.firstElementChild.style.left = el.checked ? '22px' : '2px';
-    }
-  });
 
   const body = {
     telegram_token:          document.getElementById('tg_token')?.value    || '',
