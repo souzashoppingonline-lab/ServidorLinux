@@ -2561,19 +2561,35 @@ route('POST', '/api/customers/sync', (req, res, sess) => {
 // Inbox: lista conversas recentes com última mensagem
 route('GET', '/api/messages/inbox', (req, res, sess) => {
   try {
-    const rows = db.prepare(`
-      SELECT
-        p.pack_id, p.store_id, p.order_id, p.buyer,
-        s.nickname as store_name,
-        (SELECT text FROM messages_cache mc WHERE mc.pack_id=p.pack_id ORDER BY mc.created_at DESC LIMIT 1) as last_text,
-        (SELECT created_at FROM messages_cache mc WHERE mc.pack_id=p.pack_id ORDER BY mc.created_at DESC LIMIT 1) as last_date,
-        (SELECT COUNT(*) FROM messages_cache mc WHERE mc.pack_id=p.pack_id) as msg_count
+    // Conversas com mensagens no cache (têm conteúdo)
+    const comCache = db.prepare(`
+      SELECT mc.pack_id, mc.store_id, p.order_id, p.buyer,
+             s.nickname as store_name,
+             MAX(mc.created_at) as last_date,
+             (SELECT text FROM messages_cache m2 WHERE m2.pack_id=mc.pack_id ORDER BY m2.created_at DESC LIMIT 1) as last_text,
+             COUNT(*) as msg_count
+      FROM messages_cache mc
+      JOIN stores s ON s.id = mc.store_id
+      LEFT JOIN packs_seen p ON p.pack_id = mc.pack_id
+      GROUP BY mc.pack_id
+      ORDER BY last_date DESC
+      LIMIT 30
+    `).all();
+
+    // Packs conhecidos mas sem mensagens no cache ainda
+    const semCache = db.prepare(`
+      SELECT p.pack_id, p.store_id, p.order_id, p.buyer,
+             s.nickname as store_name,
+             NULL as last_date, NULL as last_text, 0 as msg_count
       FROM packs_seen p
       JOIN stores s ON s.id = p.store_id
-      ORDER BY last_date DESC
-      LIMIT 50
+      WHERE p.pack_id NOT LIKE 'noPack:%'
+        AND p.pack_id NOT IN (SELECT DISTINCT pack_id FROM messages_cache)
+      ORDER BY p.synced_at DESC
+      LIMIT 20
     `).all();
-    ok(res, { conversations: rows });
+
+    ok(res, { conversations: [...comCache, ...semCache] });
   } catch (e) {
     apiErr(res, 500, e.message);
   }
