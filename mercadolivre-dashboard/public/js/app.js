@@ -3005,7 +3005,6 @@ async function vtLoad() {
           </td>
           <td style="${td};color:var(--text-3);font-size:10px">${v.sku||'-'}</td>
           <td style="${td};white-space:nowrap">${fmt.date(v.date)}</td>
-          <td style="${td};text-align:right;color:var(--text-3)">-</td>
           <td style="${td};text-align:right">${M(v.unit_price)}</td>
           <td style="${td};text-align:center">${v.quantity}</td>
           <td style="${td};text-align:right;font-weight:700">${M(v.faturamento)}</td>
@@ -3046,7 +3045,6 @@ async function vtLoad() {
               <th style="${th}" onclick="vtSort('loja')">Conta ${sortArrow('loja')}</th>
               <th style="${th}">SKU</th>
               <th style="${th}" onclick="vtSort('date')">Data ${sortArrow('date')}</th>
-              <th style="${th};text-align:right">Frete</th>
               <th style="${th};text-align:right">Unit.</th>
               <th style="${th};text-align:center">Qtd</th>
               <th style="${th};text-align:right" onclick="vtSort('faturamento')">Fat. ML ${sortArrow('faturamento')}</th>
