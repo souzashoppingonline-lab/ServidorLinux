@@ -1,1 +1,25 @@
 .claude/
+
+# Dependências
+node_modules/
+**/node_modules/
+
+# Banco de dados (contém tokens e dados de clientes)
+*.db
+*.db-shm
+*.db-wal
+mercadolivre-dashboard/data/
+
+# Variáveis de ambiente (contém segredos)
+.env
+.env.local
+.env.production
+**/.env
+
+# Logs
+*.log
+logs/
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
