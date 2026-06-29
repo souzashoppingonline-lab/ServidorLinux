@@ -692,8 +692,16 @@ const JOB_HANDLERS = {
         await Promise.all(batch.map(async ({ orderId, shippingId }) => {
           try {
             const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
-            const baseCost = ship?.base_cost || ship?.cost?.gross || 0;
             const logType  = ship?.logistic_type || '';
+            const baseCost =
+              ship?.base_cost ||
+              ship?.cost?.gross ||
+              ship?.cost?.net ||
+              ship?.shipping_cost ||
+              ship?.costs?.shipping ||
+              0;
+            // Log first shipment per sync to diagnose cost fields
+            if (i === 0) console.log(`[shipment] id=${shippingId} logistic_type=${logType} base_cost=${ship?.base_cost} cost=${JSON.stringify(ship?.cost)} keys=${Object.keys(ship||{}).join(',')}`);
             updateSellerShipping.run(baseCost, logType, orderId);
           } catch { /* ignore individual failures */ }
         }));
