@@ -1742,7 +1742,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       order_id:    r.order_id,
       item_id:     r.item_id,
       item_title:  r.item_title,
-      sku:         '',
+      sku:         r.item_id || '',
       date:        r.date_created,
       store_id:    r.store_id,
       store_name:  r.store_name,
