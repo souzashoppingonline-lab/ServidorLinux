@@ -661,14 +661,15 @@ const JOB_HANDLERS = {
       const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
-      const updateSellerShipping = db.prepare(`UPDATE orders SET seller_shipping_cost=?, shipping_logistic_type=? WHERE id=?`);
+      const updateLogisticType = db.prepare(`UPDATE orders SET shipping_logistic_type=? WHERE id=?`);
 
       // Collect shipping IDs to fetch base_cost from ML
       const shippingToFetch = [];
       db.transaction((orders) => {
         for (const o of orders) {
           const addr = o.shipping?.receiver_address || {};
-          const buyerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
+          // payments[].shipping_cost = what ML charges the SELLER for shipping (not buyer)
+          const sellerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
           const shippingId = String(o.shipping?.id || '');
           insertOrder.run(
             o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
@@ -676,7 +677,7 @@ const JOB_HANDLERS = {
             addr.city?.name || addr.city || '',
             addr.state?.name || addr.state || '',
             addr.state?.id || addr.state_code || '',
-            buyerShipping, shippingId, buyerShipping, 0
+            sellerShipping, shippingId, 0, sellerShipping
           );
           deleteItems.run(o.id);
           for (const item of (o.order_items||[])) {
@@ -692,13 +693,8 @@ const JOB_HANDLERS = {
         await Promise.all(batch.map(async ({ orderId, shippingId }) => {
           try {
             const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
-            const logType  = ship?.logistic_type || '';
-            // cost_components is an array of {type, amount} used for FULL fulfillment
-            const costComponents = Array.isArray(ship?.cost_components) ? ship.cost_components : [];
-            const componentTotal = costComponents.reduce((s, c) => s + (c.amount || c.cost || 0), 0);
-            if (i === 0) console.log(`[shipment] id=${shippingId} type=${logType} base_cost=${ship?.base_cost} cost_components=${JSON.stringify(costComponents)}`);
-            const baseCost = ship?.base_cost || componentTotal || 0;
-            updateSellerShipping.run(baseCost, logType, orderId);
+            const logType = ship?.logistic_type || '';
+            if (logType) updateLogisticType.run(logType, orderId);
           } catch { /* ignore individual failures */ }
         }));
       }
