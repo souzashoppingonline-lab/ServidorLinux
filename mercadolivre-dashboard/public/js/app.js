@@ -3052,9 +3052,56 @@ async function vtLoad() {
       ...(VT.dateTo      ? { dateTo:     VT.dateTo      } : {}),
     });
     const data = await API.get(`/api/vendas-totais?${qs}`);
-    const { vendas, paging } = data;
+    const { vendas, totals, paging } = data;
 
     const M = fmt.brl;
+
+    // ── Summary cards ────────────────────────────────────────
+    const mc_color = totals.mc_pct >= 20 ? '#10b981' : totals.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
+    const cardsHtml = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px">
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;border-left:4px solid #6366f1">
+          <div style="font-size:10px;font-weight:700;color:var(--text-2);text-transform:uppercase;margin-bottom:4px">$ Vendas Aprovadas</div>
+          <div style="font-size:18px;font-weight:800;color:var(--text-1)">${M(totals.faturamento)}</div>
+          <div style="margin-top:6px;font-size:10px;color:var(--text-2);display:flex;flex-direction:column;gap:2px">
+            <span>Faturamento ML &nbsp;<strong style="color:var(--text-1)">${M(totals.faturamento)}</strong></span>
+            <span>Vendas Canceladas &nbsp;<strong style="color:#ef4444">${M(totals.vendas_canceladas)}</strong></span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;border-left:4px solid #f87171">
+          <div style="font-size:10px;font-weight:700;color:var(--text-2);text-transform:uppercase;margin-bottom:4px">− Custo & Imposto</div>
+          <div style="font-size:18px;font-weight:800;color:#ef4444">${M(totals.custo_imposto)}</div>
+          <div style="margin-top:6px;font-size:10px;color:var(--text-2);display:flex;flex-direction:column;gap:2px">
+            <span>Custo &nbsp;<strong style="color:var(--text-1)">${M(totals.custo)}</strong></span>
+            <span>Imposto &nbsp;<strong style="color:var(--text-1)">${M(totals.imposto)}</strong></span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;border-left:4px solid #fbbf24">
+          <div style="font-size:10px;font-weight:700;color:var(--text-2);text-transform:uppercase;margin-bottom:4px">− Tarifa de Venda</div>
+          <div style="font-size:18px;font-weight:800;color:#f59e0b">${M(totals.tarifa)}</div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;border-left:4px solid #3b82f6">
+          <div style="font-size:10px;font-weight:700;color:var(--text-2);text-transform:uppercase;margin-bottom:4px">Frete Total</div>
+          <div style="font-size:18px;font-weight:800;color:#3b82f6">${M(totals.frete_total)}</div>
+          <div style="margin-top:6px;font-size:10px;color:var(--text-2);display:flex;flex-direction:column;gap:2px">
+            <span>Frete Comprador &nbsp;<strong style="color:var(--text-1)">${M(totals.frete_comprador)}</strong></span>
+            <span>Frete Vendedor &nbsp;<strong style="color:var(--text-1)">${M(totals.frete_vendedor)}</strong></span>
+          </div>
+        </div>
+
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;border-left:4px solid ${mc_color}">
+          <div style="font-size:10px;font-weight:700;color:var(--text-2);text-transform:uppercase;margin-bottom:4px">= Margem de Contribuição</div>
+          <div style="font-size:18px;font-weight:800;color:${mc_color}">${M(totals.margem)}</div>
+          <div style="margin-top:4px;font-size:11px;font-weight:700;color:${mc_color}">(${totals.mc_pct.toFixed(2)}%)</div>
+        </div>
+
+      </div>
+    `;
+
     const p = 'padding:4px 6px';
     const th = `${p};font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text-2);cursor:pointer;user-select:none;white-space:nowrap`;
     const td = `${p};font-size:11px;vertical-align:middle`;
@@ -3109,7 +3156,7 @@ async function vtLoad() {
       </div>
     ` : `<div style="font-size:12px;color:var(--text-2);text-align:center;margin-top:8px">${paging.total} registro${paging.total !== 1 ? 's' : ''}</div>`;
 
-    wrap.innerHTML = `
+    wrap.innerHTML = cardsHtml + `
       <div class="card" style="overflow-x:auto;padding:0">
         <table style="width:100%;border-collapse:collapse;font-size:11px">
           <thead>

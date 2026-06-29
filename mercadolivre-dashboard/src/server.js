@@ -1731,6 +1731,51 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     WHERE o.status = 'paid' ${where}
   `).get(...params).n;
 
+  const totRow = db.prepare(`
+    SELECT
+      SUM(oi.unit_price * oi.quantity) AS fat_total,
+      SUM(COALESCE(oc.cost, 0)) AS custo_total,
+      SUM((oi.unit_price * oi.quantity) * COALESCE(s.tax_rate, 0) / 100) AS imposto_total,
+      SUM(COALESCE(oi.sale_fee, 0)) AS tarifa_total,
+      SUM(COALESCE(o.shipping_cost, 0)) AS frete_v_total,
+      COUNT(*) AS qty
+    FROM order_items oi
+    JOIN orders o  ON o.id = oi.order_id
+    JOIN stores s  ON s.id = o.store_id
+    LEFT JOIN order_costs oc ON oc.order_id = oi.order_id AND oc.item_id = oi.item_id
+    WHERE o.status = 'paid' ${where}
+  `).get(...params);
+
+  const cancelRow = db.prepare(`
+    SELECT SUM(COALESCE(oi.unit_price * oi.quantity, 0)) AS cancelled_total
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status IN ('cancelled','invalid') ${where}
+  `).get(...params);
+
+  const fat_t    = totRow.fat_total    || 0;
+  const custo_t  = totRow.custo_total  || 0;
+  const imp_t    = totRow.imposto_total|| 0;
+  const tar_t    = totRow.tarifa_total || 0;
+  const fretev_t = totRow.frete_v_total|| 0;
+  const margem_t = fat_t - custo_t - imp_t - tar_t - fretev_t;
+  const mc_pct_t = fat_t > 0 ? (margem_t / fat_t) * 100 : 0;
+
+  const totals = {
+    faturamento:      fat_t,
+    vendas_canceladas: cancelRow.cancelled_total || 0,
+    custo:            custo_t,
+    imposto:          imp_t,
+    custo_imposto:    custo_t + imp_t,
+    tarifa:           tar_t,
+    frete_comprador:  0,
+    frete_vendedor:   fretev_t,
+    frete_total:      fretev_t,
+    margem:           margem_t,
+    mc_pct:           mc_pct_t,
+    count:            totRow.qty || 0,
+  };
+
   const vendas = rows.map(r => {
     const fat      = r.faturamento  || 0;
     const custo    = r.oc_cost      || 0;
@@ -1770,7 +1815,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     };
   });
 
-  ok(res, { vendas, paging: { total, limit, offset } });
+  ok(res, { vendas, totals, paging: { total, limit, offset } });
 });
 
 route('PUT', '/api/vendas-totais/cost', async (req, res, sess) => {
