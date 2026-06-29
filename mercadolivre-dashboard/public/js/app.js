@@ -143,6 +143,16 @@ function initWebSocket() {
         );
       }
 
+      if (msg.type === 'question_answered') {
+        notifToast('✅', 'Pergunta respondida via Telegram', 'Resposta enviada ao comprador');
+        if (location.hash === '#questions') renderQuestions?.();
+      }
+
+      if (msg.type === 'message_sent') {
+        notifToast('✅', 'Mensagem enviada via Telegram', 'Resposta enviada ao comprador');
+        if (location.hash === '#messages') renderMessages?.();
+      }
+
       if (msg.type === 'webhook') {
         // silencioso — apenas log
         console.log('[ws] webhook', msg.data.topic);

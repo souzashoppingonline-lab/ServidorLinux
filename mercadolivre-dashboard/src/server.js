@@ -308,6 +308,23 @@ try {
   `);
 } catch {}
 
+// Mapeia mensagens do Telegram para perguntas/conversas ML, permitindo responder via reply no Telegram
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS telegram_reply_map (
+      tg_message_id INTEGER PRIMARY KEY,
+      kind          TEXT NOT NULL,
+      question_id   TEXT DEFAULT '',
+      pack_id       TEXT DEFAULT '',
+      order_id      TEXT DEFAULT '',
+      store_id      TEXT NOT NULL,
+      item_title    TEXT DEFAULT '',
+      buyer         TEXT DEFAULT '',
+      created_at    INTEGER DEFAULT (unixepoch())
+    );
+  `);
+} catch {}
+
 // Order costs — manual COGS per order item
 try {
   db.exec(`
@@ -3775,6 +3792,35 @@ function coletarStatus() {
 }
 
 // Envia mensagem Telegram
+function telegramBaseUrl() {
+  try {
+    const u = new URL(ML_REDIRECT_URI);
+    return `${u.protocol}//${u.host}`;
+  } catch { return ''; }
+}
+
+async function setTelegramWebhook(token) {
+  const base = telegramBaseUrl();
+  if (!base || !token) return;
+  let secret = monitorGet('telegram_webhook_secret', '');
+  if (!secret) {
+    secret = crypto.randomBytes(24).toString('hex');
+    monitorSet('telegram_webhook_secret', secret);
+  }
+  const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: `${base}/api/telegram/webhook`,
+      secret_token: secret,
+      allowed_updates: ['message'],
+    }),
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.description || 'Falha ao registrar webhook do Telegram');
+  return json;
+}
+
 async function sendTelegram(token, chatId, text) {
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const res = await fetch(url, {
@@ -3896,6 +3942,10 @@ route('PUT', '/api/monitor/config', async (req, res, sess) => {
   });
   // Reagenda se intervalo mudou
   startMonitorJob();
+  // Registra webhook do Telegram para permitir responder via reply
+  if (body.telegram_token) {
+    setTelegramWebhook(body.telegram_token).catch(e => console.error('[telegram_webhook] setup:', e.message));
+  }
   ok(res, { ok: true });
 });
 
@@ -3939,8 +3989,59 @@ route('POST', '/api/monitor/send-now', async (req, res, sess) => {
   }
 });
 
+// Recebe replies do Telegram e responde a pergunta/mensagem correspondente no ML
+route('POST', '/api/telegram/webhook', async (req, res) => {
+  try {
+    const secret = monitorGet('telegram_webhook_secret', '');
+    if (secret && req.headers['x-telegram-bot-api-secret-token'] !== secret) {
+      res.writeHead(403); res.end(); return;
+    }
+
+    const body = await readBody(req);
+    const msg  = body?.message;
+    if (!msg?.reply_to_message?.message_id || !msg.text) {
+      res.writeHead(200); res.end('ok'); return;
+    }
+
+    const map = db.prepare('SELECT * FROM telegram_reply_map WHERE tg_message_id=?')
+      .get(msg.reply_to_message.message_id);
+    if (!map) { res.writeHead(200); res.end('ok'); return; }
+
+    const store = db.prepare('SELECT * FROM stores WHERE id=?').get(map.store_id);
+    const token = await ensureFreshToken(store);
+    const tgToken = monitorGet('telegram_token', '');
+    const tgChat  = monitorGet('telegram_chat_id', '');
+
+    if (map.kind === 'question') {
+      await mlFetch('/answers', { method: 'POST', token, body: { question_id: map.question_id, text: msg.text } });
+      db.prepare("UPDATE questions_sync SET status='ANSWERED', answer_text=?, answer_date=? WHERE id=?")
+        .run(msg.text, new Date().toISOString(), map.question_id);
+      broadcast('question_answered', { question_id: map.question_id, store_id: map.store_id });
+      if (tgToken && tgChat) await sendTelegram(tgToken, tgChat, `✅ Resposta enviada a <b>${map.buyer || 'comprador'}</b>.`).catch(() => {});
+    } else if (map.kind === 'message') {
+      await mlFetch(`/messages/packs/${map.pack_id}/sellers/${map.store_id}`, {
+        method: 'POST', token,
+        body: { from: { user_id: parseInt(map.store_id) }, to: { group_id: map.pack_id }, text: { plain: msg.text } },
+      });
+      broadcast('message_sent', { pack_id: map.pack_id, store_id: map.store_id });
+      if (tgToken && tgChat) await sendTelegram(tgToken, tgChat, `✅ Mensagem enviada a <b>${map.buyer || 'comprador'}</b>.`).catch(() => {});
+    }
+
+    res.writeHead(200); res.end('ok');
+  } catch (e) {
+    console.error('[telegram_webhook]', e.message);
+    try { res.writeHead(200); res.end('ok'); } catch {}
+  }
+}, true);
+
 // Inicia job ao subir o servidor
 startMonitorJob();
+
+// Garante webhook do Telegram registrado ao reiniciar o servidor
+{
+  const existingToken = monitorGet('telegram_token', '');
+  if (existingToken) setTelegramWebhook(existingToken).catch(e => console.error('[telegram_webhook] boot:', e.message));
+}
 
 // ============================================================
 // POLLING DE MENSAGENS & PERGUNTAS — WebSocket + Telegram
@@ -3987,8 +4088,17 @@ async function pollNewQuestions() {
             const msg = `❓ <b>Nova Pergunta — ${store.nickname}</b>\n\n` +
               `👤 ${payload.buyer}\n` +
               `📦 ${payload.item.slice(0, 60)}\n\n` +
-              `<i>${payload.text.slice(0, 300)}</i>`;
-            sendTelegram(tgToken, tgChat, msg).catch(() => {});
+              `<i>${payload.text.slice(0, 300)}</i>\n\n` +
+              `↩️ <i>Responda esta mensagem para enviar a resposta diretamente ao comprador.</i>`;
+            sendTelegram(tgToken, tgChat, msg).then(r => {
+              const tgMsgId = r?.result?.message_id;
+              if (tgMsgId) {
+                db.prepare(`INSERT OR IGNORE INTO telegram_reply_map
+                  (tg_message_id, kind, question_id, store_id, item_title, buyer)
+                  VALUES (?,?,?,?,?,?)`
+                ).run(tgMsgId, 'question', String(q.id), store.id, payload.item, payload.buyer);
+              }
+            }).catch(() => {});
           }
         } else {
           // Garante que perguntas existentes estão atualizadas
@@ -4059,8 +4169,17 @@ async function pollNewMessages() {
               if (tgEnabled && tgToken && tgChat && monitorGet('alert_mensagens', true)) {
                 const text = `💬 <b>Nova Mensagem — ${store.nickname}</b>\n\n` +
                   `👤 ${payload.buyer} (Pedido #${order.id})\n\n` +
-                  `<i>${payload.text.slice(0, 300)}</i>`;
-                sendTelegram(tgToken, tgChat, text).catch(() => {});
+                  `<i>${payload.text.slice(0, 300)}</i>\n\n` +
+                  `↩️ <i>Responda esta mensagem para enviar a resposta diretamente ao comprador.</i>`;
+                sendTelegram(tgToken, tgChat, text).then(r => {
+                  const tgMsgId = r?.result?.message_id;
+                  if (tgMsgId) {
+                    db.prepare(`INSERT OR IGNORE INTO telegram_reply_map
+                      (tg_message_id, kind, pack_id, order_id, store_id, buyer)
+                      VALUES (?,?,?,?,?,?)`
+                    ).run(tgMsgId, 'message', packId, order.id, store.id, payload.buyer);
+                  }
+                }).catch(() => {});
               }
 
               db.prepare('UPDATE messages_cache SET notified=1 WHERE pack_id=? AND msg_id=?').run(packId, msgId);
