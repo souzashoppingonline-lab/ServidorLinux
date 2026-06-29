@@ -259,6 +259,7 @@ for (const col of [
   "ALTER TABLE orders ADD COLUMN shipping_id TEXT DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN buyer_shipping_cost REAL DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN seller_shipping_cost REAL DEFAULT 0",
+  "ALTER TABLE orders ADD COLUMN shipping_logistic_type TEXT DEFAULT ''",
   "ALTER TABLE order_items ADD COLUMN sale_fee REAL DEFAULT 0",
   // Audit table index
   "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
@@ -660,7 +661,7 @@ const JOB_HANDLERS = {
       const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
-      const updateSellerShipping = db.prepare(`UPDATE orders SET seller_shipping_cost=? WHERE id=?`);
+      const updateSellerShipping = db.prepare(`UPDATE orders SET seller_shipping_cost=?, shipping_logistic_type=? WHERE id=?`);
 
       // Collect shipping IDs to fetch base_cost from ML
       const shippingToFetch = [];
@@ -692,7 +693,8 @@ const JOB_HANDLERS = {
           try {
             const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
             const baseCost = ship?.base_cost || ship?.cost?.gross || 0;
-            if (baseCost) updateSellerShipping.run(baseCost, orderId);
+            const logType  = ship?.logistic_type || '';
+            updateSellerShipping.run(baseCost, logType, orderId);
           } catch { /* ignore individual failures */ }
         }));
       }
@@ -1726,6 +1728,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       o.date_created, o.store_id, o.total_amount,
       COALESCE(o.buyer_shipping_cost, o.shipping_cost, 0) AS buyer_shipping_cost,
       COALESCE(o.seller_shipping_cost, 0) AS seller_shipping_cost,
+      COALESCE(o.shipping_logistic_type, '') AS shipping_logistic_type,
       o.buyer_id, o.buyer_nickname,
       o.receiver_city, o.receiver_state, o.receiver_state_code,
       s.nickname  AS store_name,
@@ -1831,9 +1834,10 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       custo,
       imposto,
       tarifa,
-      frete_comprador: frete_c,
-      frete_vendedor:  frete_v,
-      frete_total:     frete_c + frete_v,
+      frete_comprador:     frete_c,
+      frete_vendedor:      frete_v,
+      frete_total:         frete_c + frete_v,
+      shipping_type:       r.shipping_logistic_type || '',
       margem,
       mc_pct,
     };

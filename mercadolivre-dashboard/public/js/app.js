@@ -2931,6 +2931,21 @@ window.vtApplyFilter = () => {
 
 const _vtCache = new Map();
 
+const _shippingBadge = (type) => {
+  const map = {
+    fulfillment:  { label: 'FULL',  bg: '#00a650', color: '#fff' },
+    me2:          { label: 'ME2',   bg: '#3483fa', color: '#fff' },
+    me1:          { label: 'ME1',   bg: '#3483fa', color: '#fff' },
+    self_service: { label: 'Flex',  bg: '#f59e0b', color: '#fff' },
+    xd_drop_off:  { label: 'Flex',  bg: '#f59e0b', color: '#fff' },
+    drop_off:     { label: 'Agên.', bg: '#8b5cf6', color: '#fff' },
+    cross_docking:{ label: 'ME2',   bg: '#3483fa', color: '#fff' },
+  };
+  const s = map[type];
+  if (!s) return '';
+  return `<span style="display:inline-block;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:800;background:${s.bg};color:${s.color};letter-spacing:.03em">${s.label}</span>`;
+};
+
 window.vtOpenDetail = (orderId, itemId) => {
   const key = `${orderId}_${itemId}`;
   const v = _vtCache.get(key);
@@ -2947,7 +2962,10 @@ window.vtOpenDetail = (orderId, itemId) => {
       ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--border);flex-shrink:0">` : ''}
       <div style="flex:1;min-width:0">
         <div style="font-size:14px;font-weight:700;line-height:1.4;margin-bottom:6px">${v.item_title}</div>
-        <div style="font-size:11px;color:var(--text-3);font-family:monospace">${v.item_id}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+          <span style="font-size:11px;color:var(--text-3);font-family:monospace">${v.item_id}</span>
+          ${_shippingBadge(v.shipping_type)}
+        </div>
         <div style="margin-top:6px">
           <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
             ${v.store_icon||'🏪'} ${v.store_name}
@@ -3164,7 +3182,10 @@ async function vtLoad() {
           <td style="${td};min-width:150px;max-width:200px">
             <div style="display:flex;align-items:center;gap:6px">
               ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:28px;height:28px;object-fit:cover;border-radius:3px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : ''}
-              <span style="line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical" title="${v.item_title}">${v.item_title}</span>
+              <div style="min-width:0">
+                <span style="line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical" title="${v.item_title}">${v.item_title}</span>
+                ${v.shipping_type ? `<div style="margin-top:2px">${_shippingBadge(v.shipping_type)}</div>` : ''}
+              </div>
             </div>
           </td>
           <td style="${td};white-space:nowrap">
