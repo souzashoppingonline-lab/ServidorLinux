@@ -1690,8 +1690,14 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
   const sortDir = p.get('order') === 'asc' ? 'ASC' : 'DESC';
   const storeFilter = p.get('storeId'); // optional — omit to get all
 
-  const where = storeFilter ? `AND o.store_id=?` : '';
-  const params = storeFilter ? [storeFilter] : [];
+  const dateFrom = p.get('dateFrom');
+  const dateTo   = p.get('dateTo');
+  const conditions = [];
+  const params = [];
+  if (storeFilter) { conditions.push('o.store_id=?');           params.push(storeFilter); }
+  if (dateFrom)    { conditions.push("o.date_created >= ?");    params.push(dateFrom + 'T00:00:00'); }
+  if (dateTo)      { conditions.push("o.date_created <= ?");    params.push(dateTo   + 'T23:59:59'); }
+  const where = conditions.length ? 'AND ' + conditions.join(' AND ') : '';
 
   const rows = db.prepare(`
     SELECT

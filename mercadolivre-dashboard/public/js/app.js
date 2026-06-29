@@ -2885,6 +2885,8 @@ const VT = {
   sort: 'date',
   order: 'desc',
   storeFilter: '',
+  dateFrom: '',
+  dateTo: '',
 };
 
 async function renderVendasTotais() {
@@ -2895,11 +2897,14 @@ async function renderVendasTotais() {
         <div class="page-title">Vendas Totais</div>
         <div class="page-subtitle">Todas as vendas de todas as lojas consolidadas</div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select id="vtStoreFilter" class="input" style="font-size:13px" onchange="vtApplyFilter()">
           <option value="">Todas as lojas</option>
           ${(State.stores || []).map(s => `<option value="${s.id}">${s.store_icon || '🏪'} ${s.nickname}</option>`).join('')}
         </select>
+        <input id="vtDateFrom" type="date" class="input" style="font-size:13px" title="Data início" onchange="vtApplyFilter()">
+        <input id="vtDateTo"   type="date" class="input" style="font-size:13px" title="Data fim"   onchange="vtApplyFilter()">
+        <button class="btn btn-sm btn-outline" onclick="vtClearDates()">✕ Limpar datas</button>
       </div>
     </div>
     <div id="vtContent"><div class="loading-state"><div class="spinner"></div><p>Carregando...</p></div></div>
@@ -2909,6 +2914,18 @@ async function renderVendasTotais() {
 
 window.vtApplyFilter = () => {
   VT.storeFilter = document.getElementById('vtStoreFilter')?.value || '';
+  VT.dateFrom    = document.getElementById('vtDateFrom')?.value || '';
+  VT.dateTo      = document.getElementById('vtDateTo')?.value   || '';
+  VT.offset = 0;
+  vtLoad();
+};
+
+window.vtClearDates = () => {
+  const f = document.getElementById('vtDateFrom');
+  const t = document.getElementById('vtDateTo');
+  if (f) f.value = '';
+  if (t) t.value = '';
+  VT.dateFrom = ''; VT.dateTo = '';
   VT.offset = 0;
   vtLoad();
 };
@@ -2958,7 +2975,9 @@ async function vtLoad() {
       offset: VT.offset,
       sort:   VT.sort,
       order:  VT.order,
-      ...(VT.storeFilter ? { storeId: VT.storeFilter } : {}),
+      ...(VT.storeFilter ? { storeId:   VT.storeFilter } : {}),
+      ...(VT.dateFrom    ? { dateFrom:   VT.dateFrom    } : {}),
+      ...(VT.dateTo      ? { dateTo:     VT.dateTo      } : {}),
     });
     const data = await API.get(`/api/vendas-totais?${qs}`);
     const { vendas, paging } = data;
@@ -2974,7 +2993,7 @@ async function vtLoad() {
           <td style="max-width:260px">
             <div style="display:flex;align-items:center;gap:8px">
               ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : `<div style="width:36px;height:36px;background:var(--surface-2);border-radius:4px;flex-shrink:0;border:1px solid var(--border)"></div>`}
-              <span style="font-size:12px;line-height:1.3;word-break:break-word" title="${v.item_title}">${v.item_title}</span>
+              <span style="font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical" title="${v.item_title}">${v.item_title}</span>
             </div>
           </td>
           <td>
