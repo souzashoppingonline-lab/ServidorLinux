@@ -383,6 +383,22 @@ try {
   `);
 } catch {}
 
+// Rastreamento de alertas de anúncios e cancelamentos (evita reenvio)
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS listing_alerts_sent (
+      kind     TEXT NOT NULL,
+      ref_id   TEXT NOT NULL,
+      store_id TEXT NOT NULL,
+      sent_at  INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (kind, ref_id)
+    );
+  `);
+} catch {}
+
+// cancel_notified column
+try { db.exec("ALTER TABLE orders ADD COLUMN cancel_notified INTEGER DEFAULT 0"); } catch {}
+
 // Shipping address column on orders (migration)
 for (const col of [
   "ALTER TABLE orders ADD COLUMN receiver_city TEXT DEFAULT ''",
@@ -3504,6 +3520,147 @@ route('GET', '/api/cancelamentos', (req, res, sess) => {
   }
 });
 
+// ── Devoluções e Reembolsos ────────────────────────────────
+route('GET', '/api/devolucoes', (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || null;
+  const days    = parseInt(p.get('days') || '30');
+  const from    = new Date(Date.now() - days * 86400000).toISOString();
+
+  const where = storeId ? `AND o.store_id = '${storeId}'` : '';
+
+  try {
+    // Pedidos cancelados no período com itens e custo
+    const rows = db.prepare(`
+      SELECT
+        o.id           AS order_id,
+        o.store_id,
+        s.nickname     AS store_name,
+        o.buyer_nickname,
+        o.date_closed  AS cancelled_at,
+        o.total_amount,
+        oi.item_id,
+        oi.item_title,
+        oi.quantity,
+        oi.unit_price,
+        COALESCE(oc.cost, 0) AS custo,
+        COALESCE(oi.sale_fee, 0) AS tarifa,
+        COALESCE(o.seller_shipping_cost, 0) AS frete
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      JOIN stores s ON s.id = o.store_id
+      LEFT JOIN order_costs oc ON oc.order_id = o.id AND oc.item_id = oi.item_id
+      WHERE o.status = 'cancelled'
+        AND o.date_created >= ?
+        ${where}
+      ORDER BY o.date_closed DESC
+      LIMIT 200
+    `).all(from);
+
+    // Resumo por loja
+    const byStore = {};
+    for (const r of rows) {
+      if (!byStore[r.store_id]) byStore[r.store_id] = { store_name: r.store_name, qtd: 0, total: 0, custo_total: 0 };
+      byStore[r.store_id].qtd++;
+      byStore[r.store_id].total    += r.unit_price * r.quantity;
+      byStore[r.store_id].custo_total += r.custo;
+    }
+
+    // Top produtos devolvidos
+    const topProd = {};
+    for (const r of rows) {
+      if (!topProd[r.item_id]) topProd[r.item_id] = { item_title: r.item_title, qtd: 0, total: 0 };
+      topProd[r.item_id].qtd   += r.quantity;
+      topProd[r.item_id].total += r.unit_price * r.quantity;
+    }
+    const topProdList = Object.entries(topProd)
+      .map(([id, v]) => ({ item_id: id, ...v }))
+      .sort((a, b) => b.total - a.total).slice(0, 10);
+
+    // Totais gerais
+    const totalDevolvido   = rows.reduce((s, r) => s + r.unit_price * r.quantity, 0);
+    const totalPedidosPago = db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status='paid' AND date_created >= ? ${where}`).get(from).n;
+    const pctCancelamentos = totalPedidosPago > 0 ? (rows.length / totalPedidosPago * 100).toFixed(1) : 0;
+
+    ok(res, {
+      orders:       rows,
+      by_store:     Object.values(byStore),
+      top_produtos: topProdList,
+      resumo: {
+        total_devolvido:    totalDevolvido,
+        qtd_cancelamentos:  rows.length,
+        pct_cancelamentos:  pctCancelamentos,
+        pedidos_pagos:      totalPedidosPago,
+      },
+    });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Anúncios com Problema ─────────────────────────────────
+route('GET', '/api/anuncios-problema', (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || null;
+  const where   = storeId ? `AND l.store_id = '${storeId}'` : '';
+
+  try {
+    // Custo médio por item_id (dos últimos 90 dias)
+    const custoMedio = {};
+    const custos = db.prepare(`
+      SELECT oi.item_id, AVG(oc.cost) as avg_cost
+      FROM order_costs oc
+      JOIN order_items oi ON oi.order_id = oc.order_id AND oi.item_id = oc.item_id
+      JOIN orders o ON o.id = oc.order_id
+      WHERE o.date_created >= date('now','-90 days') AND oc.cost > 0
+      GROUP BY oi.item_id
+    `).all();
+    for (const c of custos) custoMedio[c.item_id] = c.avg_cost;
+
+    const listings = db.prepare(`
+      SELECT l.*, s.nickname as store_name, s.tax_rate
+      FROM listings l
+      JOIN stores s ON s.id = l.store_id
+      WHERE 1=1 ${where}
+    `).all();
+
+    const pausados       = [];
+    const semEstoque     = [];
+    const margemBaixa    = [];
+    const semCusto       = [];
+
+    for (const l of listings) {
+      const custo = custoMedio[l.id];
+      const tarifa_est = l.price * 0.12; // estimativa tarifa ML ~12%
+      const imposto    = l.price * ((l.tax_rate || 0) / 100);
+      const margem     = custo ? ((l.price - custo - tarifa_est - imposto) / l.price * 100) : null;
+
+      const base = { id: l.id, title: l.title, price: l.price, store_id: l.store_id, store_name: l.store_name, available_quantity: l.available_quantity, custo, margem };
+
+      if (l.status === 'paused')                                base.problema = 'Pausado',          pausados.push(base);
+      else if (l.status === 'active' && l.available_quantity === 0) base.problema = 'Sem estoque',  semEstoque.push(base);
+      else if (margem !== null && margem < 10)                  base.problema = `Margem ${margem.toFixed(1)}%`, margemBaixa.push({ ...base, margem });
+      else if (!custo && l.status === 'active')                 base.problema = 'Sem custo',        semCusto.push(base);
+    }
+
+    ok(res, {
+      pausados:    pausados.sort((a,b)=>b.price-a.price),
+      sem_estoque: semEstoque.sort((a,b)=>b.price-a.price),
+      margem_baixa: margemBaixa.sort((a,b)=>a.margem-b.margem),
+      sem_custo:   semCusto.sort((a,b)=>b.price-a.price),
+      totais: {
+        pausados: pausados.length,
+        sem_estoque: semEstoque.length,
+        margem_baixa: margemBaixa.length,
+        sem_custo: semCusto.length,
+        criticos: pausados.length + semEstoque.length + margemBaixa.length,
+      },
+    });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
 // ── Comparação de Períodos por Loja ────────────────────────
 route('GET', '/api/comparativo', (req, res, sess) => {
   try {
@@ -3779,8 +3936,10 @@ const MONITOR_DEFAULTS = {
   alert_scheduler:  true,
   alert_pm2:        true,
   alert_erros:      true,
-  alert_perguntas:  true,
-  alert_mensagens:  true,
+  alert_perguntas:     true,
+  alert_mensagens:     true,
+  alert_cancelamentos: true,
+  alert_anuncios:      true,
   threshold_estoque_dias: 7,
   threshold_erros:  3,
   quiet_start:      0,
@@ -4090,6 +4249,84 @@ route('POST', '/api/telegram/webhook', async (req, res) => {
     try { res.writeHead(200); res.end('ok'); } catch {}
   }
 }, true);
+
+// ── Alertas automáticos: cancelamentos novos e anúncios problema ──
+async function checkCancelamentosAlert() {
+  const tgEnabled = monitorGet('enabled', false);
+  const tgToken   = monitorGet('telegram_token', '');
+  const tgChat    = monitorGet('telegram_chat_id', '');
+  if (!tgEnabled || !tgToken || !tgChat) return;
+  if (!monitorGet('alert_cancelamentos', true)) return;
+
+  const novos = db.prepare(`
+    SELECT o.id, o.store_id, s.nickname, o.buyer_nickname, o.total_amount,
+           GROUP_CONCAT(oi.item_title, ', ') as itens
+    FROM orders o
+    JOIN stores s ON s.id = o.store_id
+    JOIN order_items oi ON oi.order_id = o.id
+    WHERE o.status = 'cancelled' AND o.cancel_notified = 0
+    GROUP BY o.id
+    ORDER BY o.date_closed DESC LIMIT 10
+  `).all();
+
+  for (const o of novos) {
+    const msg = `❌ <b>Cancelamento — ${o.nickname}</b>\n\n` +
+      `👤 ${o.buyer_nickname || 'Comprador'}\n` +
+      `📦 ${(o.itens || '').slice(0, 80)}\n` +
+      `💰 R$ ${Number(o.total_amount).toFixed(2).replace('.', ',')}`;
+    await sendTelegram(tgToken, tgChat, msg).catch(() => {});
+    db.prepare('UPDATE orders SET cancel_notified=1 WHERE id=?').run(o.id);
+  }
+}
+
+async function checkAnunciosProblemaAlert() {
+  const tgEnabled = monitorGet('enabled', false);
+  const tgToken   = monitorGet('telegram_token', '');
+  const tgChat    = monitorGet('telegram_chat_id', '');
+  if (!tgEnabled || !tgToken || !tgChat) return;
+  if (!monitorGet('alert_anuncios', true)) return;
+
+  // Pausados recentes (synced nas últimas 2h com status paused) não alertados ainda
+  const pausados = db.prepare(`
+    SELECT l.id, l.title, l.price, s.nickname
+    FROM listings l JOIN stores s ON s.id = l.store_id
+    WHERE l.status = 'paused'
+      AND NOT EXISTS (SELECT 1 FROM listing_alerts_sent WHERE kind='paused' AND ref_id=l.id)
+  `).all();
+  for (const l of pausados) {
+    const msg = `⏸️ <b>Anúncio Pausado — ${l.nickname}</b>\n📦 ${l.title.slice(0,80)}\n💰 R$ ${Number(l.price).toFixed(2).replace('.',',')}`;
+    await sendTelegram(tgToken, tgChat, msg).catch(() => {});
+    db.prepare('INSERT OR IGNORE INTO listing_alerts_sent(kind,ref_id,store_id) VALUES(?,?,?)').run('paused', l.id, '');
+  }
+
+  // Sem estoque mas ativo
+  const semEstoque = db.prepare(`
+    SELECT l.id, l.title, l.price, s.nickname
+    FROM listings l JOIN stores s ON s.id = l.store_id
+    WHERE l.status = 'active' AND l.available_quantity = 0
+      AND NOT EXISTS (SELECT 1 FROM listing_alerts_sent WHERE kind='zero_stock' AND ref_id=l.id)
+  `).all();
+  for (const l of semEstoque) {
+    const msg = `📭 <b>Sem Estoque (ativo) — ${l.nickname}</b>\n📦 ${l.title.slice(0,80)}\n💰 R$ ${Number(l.price).toFixed(2).replace('.',',')}`;
+    await sendTelegram(tgToken, tgChat, msg).catch(() => {});
+    db.prepare('INSERT OR IGNORE INTO listing_alerts_sent(kind,ref_id,store_id) VALUES(?,?,?)').run('zero_stock', l.id, '');
+  }
+
+  // Limpa alertas de anúncios que voltaram ao normal
+  db.prepare("DELETE FROM listing_alerts_sent WHERE kind='paused' AND ref_id IN (SELECT id FROM listings WHERE status != 'paused')").run();
+  db.prepare("DELETE FROM listing_alerts_sent WHERE kind='zero_stock' AND ref_id IN (SELECT id FROM listings WHERE status='active' AND available_quantity > 0)").run();
+}
+
+// Roda a cada 30 minutos (sem chamada à API do ML)
+setInterval(() => {
+  checkCancelamentosAlert().catch(() => {});
+  checkAnunciosProblemaAlert().catch(() => {});
+}, 30 * 60_000);
+
+setTimeout(() => {
+  checkCancelamentosAlert().catch(() => {});
+  checkAnunciosProblemaAlert().catch(() => {});
+}, 90_000);
 
 // Inicia job ao subir o servidor
 startMonitorJob();

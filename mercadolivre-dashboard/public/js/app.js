@@ -213,9 +213,11 @@ const PAGES = {
   ads:              renderAds,
   customers:        renderCustomers,
   'vendas-totais':  renderVendasTotais,
-  reposicao:        renderReposicao,
-  cancelamentos:    renderCancelamentos,
-  monitor:          renderMonitor,
+  reposicao:          renderReposicao,
+  cancelamentos:      renderCancelamentos,
+  devolucoes:         renderDevolucoes,
+  'anuncios-problema': renderAnunciosProblema,
+  monitor:            renderMonitor,
   comparativo:      renderComparativo,
   evolucao:         renderEvolucao,
   'curva-abc':      renderCurvaABC,
@@ -237,8 +239,10 @@ const PAGE_TITLES = {
   ads:              'Publicidade (Mercado Ads)',
   customers:        'Clientes',
   'vendas-totais':  'Vendas Totais',
-  reposicao:        'Alertas de Reposição',
-  cancelamentos:    'Taxa de Cancelamento',
+  reposicao:           'Alertas de Reposição',
+  cancelamentos:       'Taxa de Cancelamento',
+  devolucoes:          'Devoluções e Reembolsos',
+  'anuncios-problema': 'Anúncios com Problema',
   monitor:          'Monitor & Alertas Telegram',
   comparativo:      'Comparativo de Períodos',
   evolucao:         'Evolução Diária por Loja',
@@ -3684,6 +3688,147 @@ async function renderCancelamentos() {
 // ============================================================
 // MONITOR & ALERTAS TELEGRAM
 // ============================================================
+// ============================================================
+// PAGE: DEVOLUÇÕES
+// ============================================================
+async function renderDevolucoes() {
+  setContent(`
+    <div class="page-header">
+      <div class="page-title">Devoluções e Reembolsos</div>
+      <div class="page-subtitle">Pedidos cancelados com impacto financeiro</div>
+    </div>
+    <div class="filters">
+      ${[7,15,30,60].map(d=>`<button class="period-btn ${d===30?'active':''}" onclick="loadDevolucoes(${d},this)">${d}d</button>`).join('')}
+    </div>
+    <div id="devBody"><div class="loading-state"><div class="spinner"></div></div></div>
+  `);
+  await loadDevolucoes(30);
+}
+
+async function loadDevolucoes(days, btn) {
+  if (btn) { document.querySelectorAll('.period-btn').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); }
+  const wrap = document.getElementById('devBody');
+  if (!wrap) return;
+  wrap.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+  try {
+    const d = await API.get(`/api/devolucoes?days=${days}&storeId=${State.currentStore}`);
+    const r = d.resumo;
+    wrap.innerHTML = `
+      <div class="kpi-grid" style="margin-bottom:20px">
+        <div class="kpi-card"><div class="kpi-label">Total Devolvido</div><div class="kpi-value" style="color:#ef4444">${fmt.brl(r.total_devolvido)}</div></div>
+        <div class="kpi-card"><div class="kpi-label">Cancelamentos</div><div class="kpi-value">${r.qtd_cancelamentos}</div></div>
+        <div class="kpi-card"><div class="kpi-label">% sobre Pedidos</div><div class="kpi-value" style="color:${r.pct_cancelamentos>5?'#ef4444':'#22c55e'}">${r.pct_cancelamentos}%</div></div>
+        <div class="kpi-card"><div class="kpi-label">Pedidos Pagos</div><div class="kpi-value">${r.pedidos_pagos}</div></div>
+      </div>
+
+      ${d.top_produtos.length ? `
+      <div class="card" style="margin-bottom:16px">
+        <div style="font-weight:600;margin-bottom:12px">🏆 Produtos Mais Devolvidos</div>
+        <table class="data-table">
+          <thead><tr><th>Produto</th><th>Qtd</th><th>Total</th></tr></thead>
+          <tbody>${d.top_produtos.map(p=>`
+            <tr>
+              <td>${p.item_title}</td>
+              <td>${p.qtd}</td>
+              <td style="color:#ef4444">${fmt.brl(p.total)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : ''}
+
+      ${d.by_store.length ? `
+      <div class="card" style="margin-bottom:16px">
+        <div style="font-weight:600;margin-bottom:12px">🏪 Por Loja</div>
+        <table class="data-table">
+          <thead><tr><th>Loja</th><th>Cancelamentos</th><th>Total Devolvido</th></tr></thead>
+          <tbody>${d.by_store.map(s=>`
+            <tr>
+              <td>${s.store_name}</td>
+              <td>${s.qtd}</td>
+              <td style="color:#ef4444">${fmt.brl(s.total)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : ''}
+
+      ${d.orders.length ? `
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:12px">📋 Pedidos Cancelados</div>
+        <table class="data-table">
+          <thead><tr><th>Data</th><th>Loja</th><th>Comprador</th><th>Produto</th><th>Valor</th></tr></thead>
+          <tbody>${d.orders.map(o=>`
+            <tr>
+              <td style="white-space:nowrap">${fmt.dt(o.cancelled_at)}</td>
+              <td>${o.store_name}</td>
+              <td>${o.buyer_nickname||'-'}</td>
+              <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${o.item_title}</td>
+              <td style="color:#ef4444">${fmt.brl(o.unit_price*o.quantity)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>` : '<div class="empty-state"><div class="empty-state-icon">✅</div><h3>Nenhuma devolução</h3><p>Sem cancelamentos no período.</p></div>'}
+    `;
+  } catch(e) {
+    wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`;
+  }
+}
+
+// ============================================================
+// PAGE: ANÚNCIOS COM PROBLEMA
+// ============================================================
+async function renderAnunciosProblema() {
+  setContent(`
+    <div class="page-header">
+      <div class="page-title">Anúncios com Problema</div>
+      <div class="page-subtitle">Pausados, sem estoque, margem baixa e sem custo cadastrado</div>
+    </div>
+    <div id="apBody"><div class="loading-state"><div class="spinner"></div></div></div>
+  `);
+  try {
+    const d = await API.get(`/api/anuncios-problema?storeId=${State.currentStore}`);
+    const t = d.totais;
+
+    const section = (icon, title, color, items, cols) => {
+      if (!items.length) return '';
+      return `
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <span style="font-size:20px">${icon}</span>
+            <span style="font-weight:600">${title}</span>
+            <span style="background:${color}22;color:${color};border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600">${items.length}</span>
+          </div>
+          <table class="data-table">
+            <thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
+            <tbody>${items.map(l=>`
+              <tr>
+                <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><a href="${l.id?`https://www.mercadolivre.com.br/p/${l.id}`:'#'}" target="_blank" style="color:var(--ml-yellow);text-decoration:none">${l.title}</a></td>
+                <td>${l.store_name}</td>
+                <td>${fmt.brl(l.price)}</td>
+                ${cols.length>3?`<td style="color:${color}">${l.problema||'-'}</td>`:''}
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`;
+    };
+
+    document.getElementById('apBody').innerHTML = `
+      <div class="kpi-grid" style="margin-bottom:20px">
+        <div class="kpi-card"><div class="kpi-label">🔴 Pausados</div><div class="kpi-value" style="color:#ef4444">${t.pausados}</div></div>
+        <div class="kpi-card"><div class="kpi-label">📭 Sem Estoque</div><div class="kpi-value" style="color:#f97316">${t.sem_estoque}</div></div>
+        <div class="kpi-card"><div class="kpi-label">⚠️ Margem Baixa</div><div class="kpi-value" style="color:#eab308">${t.margem_baixa}</div></div>
+        <div class="kpi-card"><div class="kpi-label">❓ Sem Custo</div><div class="kpi-value" style="color:#6b7280">${t.sem_custo}</div></div>
+      </div>
+      ${!t.criticos && !t.sem_custo ? '<div class="empty-state"><div class="empty-state-icon">✅</div><h3>Tudo OK!</h3><p>Nenhum anúncio com problema encontrado.</p></div>' : ''}
+      ${section('🔴','Pausados','#ef4444', d.pausados, ['Anúncio','Loja','Preço'])}
+      ${section('📭','Ativos sem Estoque','#f97316', d.sem_estoque, ['Anúncio','Loja','Preço'])}
+      ${section('⚠️','Margem Abaixo de 10%','#eab308', d.margem_baixa, ['Anúncio','Loja','Preço','Margem'])}
+      ${section('❓','Sem Custo Cadastrado','#6b7280', d.sem_custo, ['Anúncio','Loja','Preço'])}
+    `;
+  } catch(e) {
+    document.getElementById('apBody').innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`;
+  }
+}
+
 async function renderMonitor() {
   const content = document.getElementById('content');
   content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Carregando monitor...</p></div>`;
@@ -3846,8 +3991,10 @@ async function renderMonitor() {
         ${toggle('alert_scheduler','Status do Scheduler',       'Pendentes, concluídos, retries e falhas')}
         ${toggle('alert_pm2',      'Status do processo',        'Uptime, memória e versão Node.js')}
         ${toggle('alert_erros',      'Alertas de erros críticos', 'Avisa quando há muitas falhas em 1 hora')}
-        ${toggle('alert_perguntas',  'Novas perguntas (Telegram)', 'Alerta imediato ao receber nova pergunta de comprador')}
-        ${toggle('alert_mensagens',  'Novas mensagens (Telegram)', 'Alerta imediato ao receber mensagem pós-venda')}
+        ${toggle('alert_perguntas',    'Novas perguntas (Telegram)',    'Alerta imediato ao receber nova pergunta de comprador')}
+        ${toggle('alert_mensagens',    'Novas mensagens (Telegram)',    'Alerta imediato ao receber mensagem pós-venda')}
+        ${toggle('alert_cancelamentos','Cancelamentos',                 'Alerta quando um pedido for cancelado')}
+        ${toggle('alert_anuncios',     'Anúncios pausados/sem estoque', 'Alerta quando anúncio for pausado ou zerar estoque')}
         <div style="margin-top:12px">
           <label style="font-size:12px;color:#888">Estoque crítico: alertar com menos de quantos dias?</label>
           <input id="tg_est_dias" type="number" min="1" max="30" value="${cfg.threshold_estoque_dias || 7}"
@@ -3896,7 +4043,9 @@ window.monitorSave = async function() {
     alert_pm2:        document.getElementById('tog_alert_pm2')?.checked       || false,
     alert_erros:      document.getElementById('tog_alert_erros')?.checked      || false,
     alert_perguntas:  document.getElementById('tog_alert_perguntas')?.checked  || false,
-    alert_mensagens:  document.getElementById('tog_alert_mensagens')?.checked  || false,
+    alert_mensagens:      document.getElementById('tog_alert_mensagens')?.checked      || false,
+    alert_cancelamentos:  document.getElementById('tog_alert_cancelamentos')?.checked  || false,
+    alert_anuncios:       document.getElementById('tog_alert_anuncios')?.checked       || false,
   };
   try {
     await API.put('/api/monitor/config', body);
