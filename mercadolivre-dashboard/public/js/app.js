@@ -114,6 +114,9 @@ const PAGES = {
   'vendas-totais':  renderVendasTotais,
   reposicao:        renderReposicao,
   cancelamentos:    renderCancelamentos,
+  comparativo:      renderComparativo,
+  evolucao:         renderEvolucao,
+  'curva-abc':      renderCurvaABC,
 };
 
 const PAGE_TITLES = {
@@ -134,6 +137,9 @@ const PAGE_TITLES = {
   'vendas-totais':  'Vendas Totais',
   reposicao:        'Alertas de Reposição',
   cancelamentos:    'Taxa de Cancelamento',
+  comparativo:      'Comparativo de Períodos',
+  evolucao:         'Evolução Diária por Loja',
+  'curva-abc':      'Curva ABC de Produtos',
 };
 
 function navigate(page) {
@@ -3465,6 +3471,263 @@ async function renderCancelamentos() {
       },
     });
   }
+}
+
+// ============================================================
+// COMPARATIVO DE PERÍODOS POR LOJA
+// ============================================================
+async function renderComparativo() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Calculando comparativos...</p></div>`;
+
+  let data;
+  try {
+    data = await API.get('/api/comparativo');
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro: ${e.message}</p></div>`;
+    return;
+  }
+
+  const arrow = (v) => {
+    if (v === null) return '<span style="color:#888">—</span>';
+    const cor = v >= 0 ? '#22c55e' : '#ef4444';
+    const sinal = v >= 0 ? '▲' : '▼';
+    return `<span style="color:${cor};font-weight:600">${sinal} ${Math.abs(v)}%</span>`;
+  };
+
+  const periodos = [
+    { key: 'hoje',   label: 'Hoje',       vs: 'ontem',   vsLabel: 'vs ontem',     varKey: 'vs_ontem' },
+    { key: 'semana', label: 'Últimos 7d', vs: 'sem_ant', vsLabel: 'vs 7d ant.',   varKey: 'vs_sem_ant' },
+    { key: 'mes',    label: 'Últimos 30d',vs: 'mes_ant', vsLabel: 'vs 30d ant.',  varKey: 'vs_mes_ant' },
+  ];
+
+  const storeColors = ['#FFE600','#3b82f6','#22c55e','#f59e0b','#ec4899'];
+
+  const blocosHtml = periodos.map(p => {
+    const atual = data[p.key];
+    const ant   = data[p.vs];
+    const vr    = data[p.varKey];
+
+    // Cards totais
+    const cardsHtml = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px">
+        <div class="card" style="flex:1;min-width:140px;text-align:center">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">Faturamento</div>
+          <div style="font-size:22px;font-weight:700">${fmt.brl(atual.total.faturamento)}</div>
+          <div style="font-size:12px;margin-top:4px">${arrow(vr.faturamento)} ${p.vsLabel}</div>
+          <div style="font-size:11px;color:#888">${fmt.brl(ant.total.faturamento)} anterior</div>
+        </div>
+        <div class="card" style="flex:1;min-width:120px;text-align:center">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">Pedidos</div>
+          <div style="font-size:22px;font-weight:700">${atual.total.pedidos || 0}</div>
+          <div style="font-size:12px;margin-top:4px">${arrow(vr.pedidos)} ${p.vsLabel}</div>
+          <div style="font-size:11px;color:#888">${ant.total.pedidos || 0} anterior</div>
+        </div>
+        <div class="card" style="flex:1;min-width:120px;text-align:center">
+          <div style="font-size:12px;color:#888;margin-bottom:4px">Margem</div>
+          <div style="font-size:22px;font-weight:700">${fmt.brl(atual.total.margem)}</div>
+          <div style="font-size:12px;margin-top:4px">${arrow(vr.margem)} ${p.vsLabel}</div>
+          <div style="font-size:11px;color:#888">${fmt.brl(ant.total.margem)} anterior</div>
+        </div>
+      </div>`;
+
+    // Tabela por loja
+    const lojaRows = data.stores.map((s, i) => {
+      const a = atual.por_loja[s.id] || {};
+      const b = ant.por_loja[s.id]   || {};
+      const varFat = b.faturamento > 0 ? Math.round((a.faturamento - b.faturamento) / b.faturamento * 1000) / 10 : null;
+      return `<tr>
+        <td><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${storeColors[i % storeColors.length]};margin-right:6px"></span>${s.nickname}</td>
+        <td style="text-align:right">${fmt.brl(a.faturamento||0)}</td>
+        <td style="text-align:right">${fmt.brl(b.faturamento||0)}</td>
+        <td style="text-align:center">${arrow(varFat)}</td>
+        <td style="text-align:center">${a.pedidos||0}</td>
+        <td style="text-align:right">${fmt.brl(a.margem||0)}</td>
+        <td style="text-align:center">${a.mc_pct||0}%</td>
+      </tr>`;
+    }).join('');
+
+    return `
+      <div class="card" style="margin-bottom:20px">
+        <div style="font-weight:700;font-size:16px;margin-bottom:12px">${p.label}</div>
+        ${cardsHtml}
+        <table class="table">
+          <thead><tr>
+            <th>Loja</th>
+            <th style="text-align:right">Atual</th>
+            <th style="text-align:right">Anterior</th>
+            <th style="text-align:center">Variação</th>
+            <th style="text-align:center">Pedidos</th>
+            <th style="text-align:right">Margem</th>
+            <th style="text-align:center">MC%</th>
+          </tr></thead>
+          <tbody>${lojaRows}</tbody>
+        </table>
+      </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="page-header"><h2>Comparativo de Períodos por Loja</h2></div>
+    ${blocosHtml}
+    <p style="color:#888;font-size:12px">Atualizado em ${new Date(data.gerado_em).toLocaleString('pt-BR')}</p>`;
+}
+
+// ============================================================
+// EVOLUÇÃO DIÁRIA POR LOJA
+// ============================================================
+async function renderEvolucao() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Carregando evolução...</p></div>`;
+
+  let data;
+  try {
+    data = await API.get('/api/evolucao?days=30');
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro: ${e.message}</p></div>`;
+    return;
+  }
+
+  const storeColors = ['#FFE600','#3b82f6','#22c55e','#f59e0b','#ec4899','#8b5cf6'];
+  const labels = data.dates.map(d => d.slice(5)); // MM-DD
+
+  content.innerHTML = `
+    <div class="page-header"><h2>Evolução Diária por Loja — últimos 30 dias</h2></div>
+
+    <div class="card" style="margin-bottom:20px">
+      <div style="font-weight:600;margin-bottom:12px">Faturamento Total (todas as lojas)</div>
+      <canvas id="chartEvolTotal" height="90"></canvas>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
+      ${data.stores.map((s, i) => `
+        <div class="card">
+          <div style="font-weight:600;margin-bottom:12px">
+            <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${storeColors[i % storeColors.length]};margin-right:6px"></span>
+            ${s.nickname}
+          </div>
+          <canvas id="chartLoja_${s.id}" height="110"></canvas>
+        </div>`).join('')}
+    </div>`;
+
+  // Gráfico total
+  const ctxTotal = document.getElementById('chartEvolTotal');
+  if (ctxTotal) {
+    State.charts['evolTotal'] = new Chart(ctxTotal, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Faturamento',
+          data: data.total.map(d => d.faturamento),
+          borderColor: '#FFE600', backgroundColor: 'rgba(255,230,0,0.1)',
+          tension: 0.3, fill: true, pointRadius: 2,
+        }, {
+          label: 'Margem',
+          data: data.total.map(d => d.margem),
+          borderColor: '#22c55e', backgroundColor: 'rgba(34,197,94,0.08)',
+          tension: 0.3, fill: true, pointRadius: 2,
+        }],
+      },
+      options: { responsive:true, plugins:{ legend:{ position:'top' } }, scales:{ y:{ beginAtZero:true } } },
+    });
+  }
+
+  // Gráfico por loja
+  data.stores.forEach((s, i) => {
+    const ctx = document.getElementById(`chartLoja_${s.id}`);
+    if (!ctx) return;
+    const serie = data.series[s.id];
+    if (!serie) return;
+    const cor = storeColors[i % storeColors.length];
+    State.charts[`evol_${s.id}`] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Faturamento',
+          data: serie.dias.map(d => d.faturamento),
+          backgroundColor: cor + 'aa',
+          borderColor: cor, borderWidth: 1,
+        }],
+      },
+      options: { responsive:true, plugins:{ legend:{ display:false } }, scales:{ y:{ beginAtZero:true } } },
+    });
+  });
+}
+
+// ============================================================
+// CURVA ABC POR LOJA
+// ============================================================
+async function renderCurvaABC() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Calculando curva ABC...</p></div>`;
+
+  let data;
+  try {
+    data = await API.get('/api/curva-abc?days=30');
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro: ${e.message}</p></div>`;
+    return;
+  }
+
+  const cls = { A: 'badge-green', B: 'badge-yellow', C: 'badge-red' };
+  const desc = {
+    A: 'Top 80% do faturamento — manter estoque e priorizar',
+    B: 'Próximos 15% — monitorar e otimizar',
+    C: 'Últimos 5% — avaliar descontinuação',
+  };
+
+  const resumoHtml = ['A','B','C'].map(c => `
+    <div class="card" style="flex:1;min-width:160px;border-left:4px solid ${c==='A'?'#22c55e':c==='B'?'#f59e0b':'#ef4444'}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="badge ${cls[c]}" style="font-size:16px;padding:4px 10px">CLASSE ${c}</span>
+      </div>
+      <div style="font-size:24px;font-weight:700">${data.resumo[c].count} produtos</div>
+      <div style="font-size:14px;color:#888;margin-top:4px">${fmt.brl(data.resumo[c].fat)} (${data.resumo[c].pct}%)</div>
+      <div style="font-size:11px;color:#888;margin-top:6px">${desc[c]}</div>
+    </div>`).join('');
+
+  // Tabela por loja
+  const lojasHtml = Object.values(data.por_loja).map(loja => {
+    const lojaRows = (rows) => rows.map(p => `<tr>
+      <td><span class="badge ${cls[p.curva]}">${p.curva}</span></td>
+      <td style="max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${p.item_title}">${p.item_title}</td>
+      <td style="text-align:center">${p.pedidos}</td>
+      <td style="text-align:center">${p.unidades}</td>
+      <td style="text-align:right">${fmt.brl(p.faturamento)}</td>
+      <td style="text-align:center">${p.pct_fat}%</td>
+      <td style="text-align:center">${p.pct_acum}%</td>
+      <td style="text-align:center;color:${p.mc_pct<0?'#ef4444':p.mc_pct<20?'#f59e0b':'#22c55e'}">${p.mc_pct}%</td>
+    </tr>`).join('');
+
+    const allRows = [...loja.A, ...loja.B, ...loja.C];
+    return `
+      <div class="card" style="margin-bottom:20px;overflow:auto">
+        <div style="font-weight:700;font-size:15px;margin-bottom:12px">${loja.loja}
+          <span style="font-size:12px;font-weight:400;color:#888">— ${allRows.length} produtos ativos</span>
+        </div>
+        <table class="table">
+          <thead><tr>
+            <th>Classe</th><th>Produto</th>
+            <th style="text-align:center">Pedidos</th>
+            <th style="text-align:center">Unid.</th>
+            <th style="text-align:right">Faturamento</th>
+            <th style="text-align:center">% Fat.</th>
+            <th style="text-align:center">% Acum.</th>
+            <th style="text-align:center">MC%</th>
+          </tr></thead>
+          <tbody>${lojaRows(allRows)}</tbody>
+        </table>
+      </div>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="page-header">
+      <h2>Curva ABC de Produtos — últimos ${data.days} dias</h2>
+      <span style="color:#888;font-size:13px">Total: ${fmt.brl(data.total_faturamento)}</span>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px">${resumoHtml}</div>
+    ${lojasHtml}`;
 }
 
 // ============================================================

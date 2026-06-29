@@ -3396,6 +3396,256 @@ route('GET', '/api/cancelamentos', (req, res, sess) => {
   }
 });
 
+// ── Comparação de Períodos por Loja ────────────────────────
+route('GET', '/api/comparativo', (req, res, sess) => {
+  try {
+    const now = Date.now();
+    const d = (ms) => new Date(now - ms).toISOString();
+
+    const periodos = {
+      hoje:        { from: d(0),           label: 'Hoje' },
+      ontem:       { from: d(86400000),    label: 'Ontem' },
+      semana:      { from: d(7*86400000),  label: 'Esta semana' },
+      sem_ant:     { from: d(14*86400000), label: 'Semana anterior' },
+      mes:         { from: d(30*86400000), label: 'Este mês' },
+      mes_ant:     { from: d(60*86400000), label: 'Mês anterior' },
+    };
+
+    // hoje = a partir da meia-noite local
+    const todayStr = (() => {
+      const n = new Date();
+      return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+    })();
+    const ontemStr = (() => {
+      const n = new Date(now - 86400000);
+      return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+    })();
+
+    const stores = db.prepare('SELECT id, nickname FROM stores').all();
+
+    const queryPeriod = (fromStr, toStr) => db.prepare(`
+      SELECT
+        o.store_id,
+        COUNT(DISTINCT o.id)                          AS pedidos,
+        SUM(oi.quantity)                              AS unidades,
+        ROUND(SUM(oi.unit_price * oi.quantity), 2)    AS faturamento,
+        ROUND(SUM(COALESCE(oi.sale_fee, 0)), 2)       AS tarifa,
+        ROUND(SUM(COALESCE(o.seller_shipping_cost,0)),2) AS frete_v,
+        ROUND(SUM(COALESCE(oc.cost, 0)), 2)           AS custo,
+        ROUND(SUM(oi.unit_price*oi.quantity)
+          - SUM(COALESCE(oc.cost,0))
+          - SUM(COALESCE(oi.sale_fee,0))
+          - SUM(COALESCE(o.seller_shipping_cost,0)), 2) AS margem
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      LEFT JOIN order_costs oc ON oc.order_id = oi.order_id AND oc.item_id = oi.item_id
+      WHERE o.status='paid' AND DATE(o.date_created) >= ? AND DATE(o.date_created) <= ?
+      GROUP BY o.store_id
+    `).all(fromStr, toStr);
+
+    const storeMap = {};
+    stores.forEach(s => { storeMap[s.id] = s.nickname; });
+
+    const buildPeriod = (rows) => {
+      const byStore = {};
+      rows.forEach(r => {
+        byStore[r.store_id] = {
+          loja: storeMap[r.store_id] || r.store_id,
+          pedidos: r.pedidos, unidades: r.unidades,
+          faturamento: r.faturamento, tarifa: r.tarifa,
+          frete_v: r.frete_v, custo: r.custo, margem: r.margem,
+          mc_pct: r.faturamento > 0 ? Math.round(r.margem / r.faturamento * 1000) / 10 : 0,
+        };
+      });
+      const total = rows.reduce((acc, r) => ({
+        pedidos:     (acc.pedidos||0)     + r.pedidos,
+        faturamento: (acc.faturamento||0) + r.faturamento,
+        margem:      (acc.margem||0)      + r.margem,
+      }), {});
+      total.mc_pct = total.faturamento > 0 ? Math.round(total.margem / total.faturamento * 1000) / 10 : 0;
+      return { por_loja: byStore, total };
+    };
+
+    const hoje    = buildPeriod(queryPeriod(todayStr, todayStr));
+    const ontem   = buildPeriod(queryPeriod(ontemStr, ontemStr));
+
+    const semIni  = (() => { const d = new Date(now - 7*86400000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const semAntIni = (() => { const d = new Date(now - 14*86400000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const mesIni  = (() => { const d = new Date(now - 30*86400000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+    const mesAntIni = (() => { const d = new Date(now - 60*86400000); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; })();
+
+    const semana   = buildPeriod(queryPeriod(semIni, todayStr));
+    const sem_ant  = buildPeriod(queryPeriod(semAntIni, ontemStr));
+    const mes      = buildPeriod(queryPeriod(mesIni, todayStr));
+    const mes_ant  = buildPeriod(queryPeriod(mesAntIni, semIni));
+
+    const variacao = (atual, ant) => ant > 0 ? Math.round((atual - ant) / ant * 1000) / 10 : null;
+
+    ok(res, {
+      stores: stores.map(s => ({ id: s.id, nickname: s.nickname })),
+      hoje, ontem,
+      semana, sem_ant,
+      mes, mes_ant,
+      vs_ontem: {
+        faturamento: variacao(hoje.total.faturamento, ontem.total.faturamento),
+        pedidos:     variacao(hoje.total.pedidos,     ontem.total.pedidos),
+        margem:      variacao(hoje.total.margem,      ontem.total.margem),
+      },
+      vs_sem_ant: {
+        faturamento: variacao(semana.total.faturamento, sem_ant.total.faturamento),
+        pedidos:     variacao(semana.total.pedidos,     sem_ant.total.pedidos),
+        margem:      variacao(semana.total.margem,      sem_ant.total.margem),
+      },
+      vs_mes_ant: {
+        faturamento: variacao(mes.total.faturamento, mes_ant.total.faturamento),
+        pedidos:     variacao(mes.total.pedidos,     mes_ant.total.pedidos),
+        margem:      variacao(mes.total.margem,      mes_ant.total.margem),
+      },
+      gerado_em: new Date().toISOString(),
+    });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Evolução Diária por Loja ───────────────────────────────
+route('GET', '/api/evolucao', (req, res, sess) => {
+  const days = Math.min(parseInt(qp(req).get('days') || '30'), 90);
+  try {
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const stores = db.prepare('SELECT id, nickname FROM stores').all();
+
+    const rows = db.prepare(`
+      SELECT
+        DATE(o.date_created) as dia,
+        o.store_id,
+        COUNT(DISTINCT o.id)                              AS pedidos,
+        ROUND(SUM(oi.unit_price * oi.quantity), 2)        AS faturamento,
+        ROUND(SUM(COALESCE(oi.sale_fee,0)), 2)            AS tarifa,
+        ROUND(SUM(COALESCE(o.seller_shipping_cost,0)), 2) AS frete_v,
+        ROUND(SUM(COALESCE(oc.cost,0)), 2)                AS custo,
+        ROUND(SUM(oi.unit_price*oi.quantity)
+          - SUM(COALESCE(oc.cost,0))
+          - SUM(COALESCE(oi.sale_fee,0))
+          - SUM(COALESCE(o.seller_shipping_cost,0)), 2)   AS margem
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      LEFT JOIN order_costs oc ON oc.order_id = oi.order_id AND oc.item_id = oi.item_id
+      WHERE o.status='paid' AND DATE(o.date_created) >= ?
+      GROUP BY dia, o.store_id
+      ORDER BY dia
+    `).all(fromDate);
+
+    // Gera série de datas completa
+    const dates = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(Date.now() - i * 86400000);
+      dates.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`);
+    }
+
+    // Mapa: dia -> store_id -> dados
+    const dataMap = {};
+    rows.forEach(r => {
+      if (!dataMap[r.dia]) dataMap[r.dia] = {};
+      dataMap[r.dia][r.store_id] = r;
+    });
+
+    // Série por loja
+    const series = {};
+    stores.forEach(s => {
+      series[s.id] = {
+        nickname: s.nickname,
+        dias: dates.map(dia => {
+          const d = dataMap[dia]?.[s.id];
+          return { dia, faturamento: d?.faturamento||0, margem: d?.margem||0, pedidos: d?.pedidos||0 };
+        }),
+      };
+    });
+
+    // Série total (todas lojas somadas)
+    const total = dates.map(dia => {
+      const dayRows = Object.values(dataMap[dia] || {});
+      return {
+        dia,
+        faturamento: Math.round(dayRows.reduce((s, r) => s + (r.faturamento||0), 0) * 100) / 100,
+        margem:      Math.round(dayRows.reduce((s, r) => s + (r.margem||0),      0) * 100) / 100,
+        pedidos:     dayRows.reduce((s, r) => s + (r.pedidos||0), 0),
+      };
+    });
+
+    ok(res, { dates, series, total, stores: stores.map(s => ({ id: s.id, nickname: s.nickname })), days });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Curva ABC por Loja ─────────────────────────────────────
+route('GET', '/api/curva-abc', (req, res, sess) => {
+  const days = Math.min(parseInt(qp(req).get('days') || '30'), 90);
+  const storeFilter = qp(req).get('storeId') || null;
+  try {
+    const fromDate = new Date(Date.now() - days * 86400000).toISOString().split('T')[0];
+    const storeWhere = storeFilter ? `AND o.store_id = '${storeFilter}'` : '';
+
+    const produtos = db.prepare(`
+      SELECT
+        oi.item_id, oi.item_title, oi.store_id, s.nickname as loja,
+        COUNT(DISTINCT o.id)                              AS pedidos,
+        SUM(oi.quantity)                                  AS unidades,
+        ROUND(SUM(oi.unit_price * oi.quantity), 2)        AS faturamento,
+        ROUND(SUM(COALESCE(oi.sale_fee,0)), 2)            AS tarifa,
+        ROUND(SUM(COALESCE(o.seller_shipping_cost,0)), 2) AS frete_v,
+        ROUND(SUM(COALESCE(oc.cost,0)), 2)                AS custo,
+        ROUND(SUM(oi.unit_price*oi.quantity)
+          - SUM(COALESCE(oc.cost,0))
+          - SUM(COALESCE(oi.sale_fee,0))
+          - SUM(COALESCE(o.seller_shipping_cost,0)), 2)   AS margem
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN stores s ON s.id = oi.store_id
+      LEFT JOIN order_costs oc ON oc.order_id = oi.order_id AND oc.item_id = oi.item_id
+      WHERE o.status='paid' AND DATE(o.date_created) >= ? ${storeWhere}
+      GROUP BY oi.item_id, oi.store_id
+      ORDER BY faturamento DESC
+    `).all(fromDate);
+
+    const totalFat = produtos.reduce((s, p) => s + (p.faturamento||0), 0);
+
+    // Classifica ABC por faturamento acumulado
+    let acumulado = 0;
+    const classificados = produtos.map(p => {
+      acumulado += p.faturamento || 0;
+      const pct_acum = totalFat > 0 ? acumulado / totalFat * 100 : 0;
+      const pct_fat  = totalFat > 0 ? (p.faturamento||0) / totalFat * 100 : 0;
+      const mc_pct   = p.faturamento > 0 ? Math.round(p.margem / p.faturamento * 1000) / 10 : 0;
+      const curva    = pct_acum <= 80 ? 'A' : pct_acum <= 95 ? 'B' : 'C';
+      return { ...p, pct_fat: Math.round(pct_fat * 10)/10, pct_acum: Math.round(pct_acum * 10)/10, mc_pct, curva };
+    });
+
+    // Resumo por classe e por loja
+    const resumo = { A: { count:0, fat:0, pct:0 }, B: { count:0, fat:0, pct:0 }, C: { count:0, fat:0, pct:0 } };
+    classificados.forEach(p => {
+      resumo[p.curva].count++;
+      resumo[p.curva].fat += p.faturamento||0;
+    });
+    ['A','B','C'].forEach(c => {
+      resumo[c].fat = Math.round(resumo[c].fat * 100) / 100;
+      resumo[c].pct = totalFat > 0 ? Math.round(resumo[c].fat / totalFat * 1000) / 10 : 0;
+    });
+
+    // Resumo por loja
+    const porLoja = {};
+    classificados.forEach(p => {
+      if (!porLoja[p.store_id]) porLoja[p.store_id] = { loja: p.loja, A:[], B:[], C:[] };
+      porLoja[p.store_id][p.curva].push(p);
+    });
+
+    ok(res, { produtos: classificados, resumo, por_loja: porLoja, total_faturamento: totalFat, days });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
 // ============================================================
 // TOKEN REFRESH JOB
 // ============================================================
