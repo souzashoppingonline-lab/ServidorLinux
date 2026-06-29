@@ -3579,7 +3579,8 @@ route('GET', '/api/devolucoes', (req, res, sess) => {
 
     // Totais gerais
     const totalDevolvido   = rows.reduce((s, r) => s + r.unit_price * r.quantity, 0);
-    const totalPedidosPago = db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status='paid' AND date_created >= ? ${where}`).get(from).n;
+    const whereSimples = storeId ? `AND store_id = '${storeId}'` : '';
+    const totalPedidosPago = db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status='paid' AND date_created >= ? ${whereSimples}`).get(from).n;
     const pctCancelamentos = totalPedidosPago > 0 ? (rows.length / totalPedidosPago * 100).toFixed(1) : 0;
 
     ok(res, {
