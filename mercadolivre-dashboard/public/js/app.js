@@ -2879,7 +2879,7 @@ window.openCustomer = async function(buyerId, nickname) {
 // ============================================================
 // VENDAS TOTAIS
 // ============================================================
-const _todayStr = () => new Date().toISOString().slice(0, 10);
+const _todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 const VT = {
   offset: 0,
   limit: 50,
