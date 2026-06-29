@@ -12,12 +12,15 @@ ExecStart=/usr/bin/node src/server.js
 Restart=always
 RestartSec=10
 
+# Variáveis não-sensíveis inline
 Environment=NODE_ENV=production
 Environment=PORT=3001
-Environment=ML_APP_ID=886699420287362
-Environment=ML_APP_SECRET=5VB9CU0A50wOGCHhqZ67OnuzegeFEKza
-Environment=ML_REDIRECT_URI=https://multimixvendas.duckdns.org/ml/callback
 Environment=DATA_DIR=/var/lib/ml-dashboard
+Environment=ML_REDIRECT_URI=https://multimixvendas.duckdns.org/ml/callback
+
+# Segredos em arquivo separado (NÃO commitado no Git)
+# Criar em: /etc/ml-dashboard.env com ML_APP_ID e ML_APP_SECRET
+EnvironmentFile=/etc/ml-dashboard.env
 
 StandardOutput=journal
 StandardError=journal

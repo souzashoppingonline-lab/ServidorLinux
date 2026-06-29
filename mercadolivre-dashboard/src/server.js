@@ -10,9 +10,15 @@ const Database = require('better-sqlite3');
 // ============================================================
 // CONFIGURATION
 // ============================================================
-const ML_APP_ID      = process.env.ML_APP_ID      || '886699420287362';
-const ML_APP_SECRET  = process.env.ML_APP_SECRET  || '5VB9CU0A50wOGCHhqZ67OnuzegeFEKza';
+const ML_APP_ID      = process.env.ML_APP_ID;
+const ML_APP_SECRET  = process.env.ML_APP_SECRET;
 const ML_REDIRECT_URI = process.env.ML_REDIRECT_URI || 'https://multimixvendas.duckdns.org/ml/callback';
+
+if (!ML_APP_ID || !ML_APP_SECRET) {
+  console.error('ERRO: ML_APP_ID e ML_APP_SECRET devem ser definidos como variáveis de ambiente.');
+  console.error('Copie .env.example para /etc/ml-dashboard.env e preencha os valores.');
+  process.exit(1);
+}
 const PORT           = parseInt(process.env.PORT   || '3001', 10);
 const DATA_DIR       = process.env.DATA_DIR        || path.join(__dirname, '..', 'data');
 const PUBLIC_DIR     = path.join(__dirname, '..', 'public');
