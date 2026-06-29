@@ -4177,72 +4177,82 @@ async function pollNewMessages() {
   const stores = db.prepare('SELECT * FROM stores').all();
   for (const store of stores) {
     try {
-      // Busca packs (conversas) recentes via pedidos pagos
-      const recentOrders = db.prepare(
-        "SELECT id, buyer_nickname FROM orders WHERE store_id=? AND status='paid' ORDER BY date_created DESC LIMIT 30"
-      ).all(store.id);
+      // Fase 1: descobrir novos packs para pedidos que ainda não têm pack_id registrado
+      // Limita a 5 pedidos novos por ciclo para não estourar rate limit
+      const ordensNovasSemPack = db.prepare(`
+        SELECT id, buyer_nickname FROM orders
+        WHERE store_id=? AND status='paid'
+          AND id NOT IN (SELECT order_id FROM packs_seen WHERE store_id=?)
+        ORDER BY date_created DESC LIMIT 5
+      `).all(store.id, store.id);
 
-      for (const order of recentOrders) {
-        try {
-          // Packs associados ao pedido
-          const packsData = await mlFetch(`/packs/by_order_id/${order.id}`, {}, store.id).catch(() => null);
-          if (!packsData?.id) continue;
-          const packId = String(packsData.id);
-
-          // Salva pack visto
+      for (const order of ordensNovasSemPack) {
+        const packsData = await mlFetch(`/packs/by_order_id/${order.id}`, {}, store.id).catch(() => null);
+        if (!packsData?.id) {
+          // Marca com pack_id vazio para não tentar de novo
           db.prepare('INSERT OR IGNORE INTO packs_seen(pack_id,store_id,order_id,buyer) VALUES(?,?,?,?)')
-            .run(packId, store.id, order.id, order.buyer_nickname || '');
+            .run(`noPack:${order.id}`, store.id, order.id, order.buyer_nickname || '');
+          continue;
+        }
+        db.prepare('INSERT OR IGNORE INTO packs_seen(pack_id,store_id,order_id,buyer) VALUES(?,?,?,?)')
+          .run(String(packsData.id), store.id, order.id, order.buyer_nickname || '');
+      }
 
-          // Busca mensagens do pack
-          const msgData = await mlFetch(`/messages/packs/${packId}/sellers/${store.id}?tag=post_sale`, {}, store.id).catch(() => null);
-          if (!msgData?.messages?.length) continue;
+      // Fase 2: checar mensagens novas em packs já conhecidos (últimos 20 packs com pack_id válido)
+      const packsConhecidos = db.prepare(`
+        SELECT pack_id, order_id, buyer FROM packs_seen
+        WHERE store_id=? AND pack_id NOT LIKE 'noPack:%'
+        ORDER BY synced_at DESC LIMIT 20
+      `).all(store.id);
 
-          for (const msg of msgData.messages) {
-            if (msg.from?.user_id === parseInt(store.id)) continue; // ignora próprias mensagens
-            const msgId = String(msg.id || msg.created_at);
+      for (const pack of packsConhecidos) {
+        const packId = pack.pack_id;
+        const msgData = await mlFetch(`/messages/packs/${packId}/sellers/${store.id}?tag=post_sale`, {}, store.id).catch(() => null);
+        if (!msgData?.messages?.length) continue;
 
-            const exists = db.prepare('SELECT msg_id FROM messages_cache WHERE pack_id=? AND msg_id=?').get(packId, msgId);
-            if (!exists) {
-              db.prepare(`INSERT OR IGNORE INTO messages_cache(pack_id,store_id,msg_id,from_user,text,created_at,notified)
-                VALUES(?,?,?,?,?,?,0)`)
-                .run(packId, store.id, msgId, msg.from?.nickname||msg.from?.user_id||'', msg.text?.plain||'', msg.created_at||'');
+        for (const msg of msgData.messages) {
+          if (msg.from?.user_id === parseInt(store.id)) continue;
+          const msgId = String(msg.id || msg.created_at);
+          const exists = db.prepare('SELECT msg_id FROM messages_cache WHERE pack_id=? AND msg_id=?').get(packId, msgId);
+          if (exists) continue;
 
-              const payload = {
-                type:    'new_message',
-                pack_id: packId,
-                store:   store.nickname,
-                store_id: store.id,
-                buyer:   msg.from?.nickname || order.buyer_nickname || 'Comprador',
-                text:    msg.text?.plain || '',
-                order_id: order.id,
-                date:    msg.created_at,
-              };
-              broadcast('new_message', payload);
+          db.prepare(`INSERT OR IGNORE INTO messages_cache(pack_id,store_id,msg_id,from_user,text,created_at,notified)
+            VALUES(?,?,?,?,?,?,0)`)
+            .run(packId, store.id, msgId, msg.from?.nickname||String(msg.from?.user_id||''), msg.text?.plain||'', msg.created_at||'');
 
-              // Telegram
-              const tgEnabled = monitorGet('enabled', false);
-              const tgToken   = monitorGet('telegram_token', '');
-              const tgChat    = monitorGet('telegram_chat_id', '');
-              if (tgEnabled && tgToken && tgChat && monitorGet('alert_mensagens', true)) {
-                const text = `💬 <b>Nova Mensagem — ${store.nickname}</b>\n\n` +
-                  `👤 ${payload.buyer} (Pedido #${order.id})\n\n` +
-                  `<i>${payload.text.slice(0, 300)}</i>\n\n` +
-                  `↩️ <i>Responda esta mensagem para enviar a resposta diretamente ao comprador.</i>`;
-                sendTelegram(tgToken, tgChat, text).then(r => {
-                  const tgMsgId = r?.result?.message_id;
-                  if (tgMsgId) {
-                    db.prepare(`INSERT OR IGNORE INTO telegram_reply_map
-                      (tg_message_id, kind, pack_id, order_id, store_id, buyer)
-                      VALUES (?,?,?,?,?,?)`
-                    ).run(tgMsgId, 'message', packId, order.id, store.id, payload.buyer);
-                  }
-                }).catch(() => {});
+          const payload = {
+            type:     'new_message',
+            pack_id:  packId,
+            store:    store.nickname,
+            store_id: store.id,
+            buyer:    msg.from?.nickname || pack.buyer || 'Comprador',
+            text:     msg.text?.plain || '',
+            order_id: pack.order_id,
+            date:     msg.created_at,
+          };
+          broadcast('new_message', payload);
+
+          const tgEnabled = monitorGet('enabled', false);
+          const tgToken   = monitorGet('telegram_token', '');
+          const tgChat    = monitorGet('telegram_chat_id', '');
+          if (tgEnabled && tgToken && tgChat && monitorGet('alert_mensagens', true)) {
+            const tgText = `💬 <b>Nova Mensagem — ${store.nickname}</b>\n\n` +
+              `👤 ${payload.buyer} (Pedido #${pack.order_id})\n\n` +
+              `<i>${payload.text.slice(0, 300)}</i>\n\n` +
+              `↩️ <i>Responda esta mensagem para enviar a resposta diretamente ao comprador.</i>`;
+            sendTelegram(tgToken, tgChat, tgText).then(r => {
+              const tgMsgId = r?.result?.message_id;
+              if (tgMsgId) {
+                db.prepare(`INSERT OR IGNORE INTO telegram_reply_map
+                  (tg_message_id, kind, pack_id, order_id, store_id, buyer)
+                  VALUES (?,?,?,?,?,?)`)
+                  .run(tgMsgId, 'message', packId, pack.order_id, store.id, payload.buyer);
               }
-
-              db.prepare('UPDATE messages_cache SET notified=1 WHERE pack_id=? AND msg_id=?').run(packId, msgId);
-            }
+            }).catch(() => {});
           }
-        } catch { /* pedido sem pack — normal */ }
+
+          db.prepare('UPDATE messages_cache SET notified=1 WHERE pack_id=? AND msg_id=?').run(packId, msgId);
+        }
       }
     } catch (e) {
       console.error(`[poll_messages] ${store.nickname}:`, e.message);
@@ -4278,6 +4288,11 @@ setInterval(() => {
 setTimeout(() => {
   pollNewQuestions().catch(() => {});
 }, 30_000);
+
+// Poll de mensagens 60s após o boot (depois das perguntas)
+setTimeout(() => {
+  pollNewMessages().catch(() => {});
+}, 60_000);
 
 // ============================================================
 // TOKEN REFRESH JOB
