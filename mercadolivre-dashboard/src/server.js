@@ -1697,7 +1697,6 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       s.store_color,
       s.store_icon,
       COALESCE(s.tax_rate, 0)  AS tax_rate,
-      COALESCE(l.seller_sku, '') AS sku,
       COALESCE(oc.cost, 0) AS oc_cost,
       (oi.unit_price * oi.quantity) AS faturamento
     FROM order_items oi
@@ -1731,7 +1730,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       order_id:    r.order_id,
       item_id:     r.item_id,
       item_title:  r.item_title,
-      sku:         r.sku,
+      sku:         '',
       date:        r.date_created,
       store_id:    r.store_id,
       store_name:  r.store_name,
