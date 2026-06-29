@@ -1669,8 +1669,8 @@ route('GET', '/api/stores/sync-status', (req, res, sess) => {
 });
 
 // ── Update store settings ────────────────────────────────────
-route('PUT', '/api/stores', (req, res, sess) => {
-  const body = parseBody(req);
+route('PUT', '/api/stores', async (req, res, sess) => {
+  const body = await readBody(req);
   const id   = qp(req).get('id') || sess.store_id;
   const allowed = ['store_color', 'store_icon', 'nickname', 'tax_rate'];
   const updates = {};
