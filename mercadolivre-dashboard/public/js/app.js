@@ -2920,6 +2920,69 @@ window.vtApplyFilter = () => {
   vtLoad();
 };
 
+const _vtCache = new Map();
+
+window.vtOpenDetail = (orderId, itemId) => {
+  const key = `${orderId}_${itemId}`;
+  const v = _vtCache.get(key);
+  if (!v) return;
+  const M = fmt.brl;
+  const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
+  const row = (label, value, bold) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
+      <span style="font-size:12px;color:var(--text-2)">${label}</span>
+      <span style="font-size:13px;${bold?'font-weight:700;':''}color:${bold||'var(--text)'}">${value}</span>
+    </div>`;
+  Modal.open('Detalhe da Venda', `
+    <div style="display:flex;gap:16px;margin-bottom:20px;align-items:flex-start">
+      ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--border);flex-shrink:0">` : ''}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:14px;font-weight:700;line-height:1.4;margin-bottom:6px">${v.item_title}</div>
+        <div style="font-size:11px;color:var(--text-3);font-family:monospace">${v.item_id}</div>
+        <div style="margin-top:6px">
+          <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
+            ${v.store_icon||'🏪'} ${v.store_name}
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-2);margin-bottom:8px;letter-spacing:.05em">👤 Comprador</div>
+    <div style="background:var(--surface-2,#f8f9fa);border-radius:8px;padding:12px;margin-bottom:16px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <div style="font-size:10px;color:var(--text-3);margin-bottom:2px">Nome</div>
+        <div style="font-size:13px;font-weight:600">${v.buyer_nickname || '—'}</div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--text-3);margin-bottom:2px">ID</div>
+        <div style="font-size:13px;font-family:monospace">${v.buyer_id || '—'}</div>
+      </div>
+      ${v.receiver_city ? `<div>
+        <div style="font-size:10px;color:var(--text-3);margin-bottom:2px">Cidade</div>
+        <div style="font-size:13px">${v.receiver_city}</div>
+      </div>` : ''}
+      ${v.receiver_state ? `<div>
+        <div style="font-size:10px;color:var(--text-3);margin-bottom:2px">Estado</div>
+        <div style="font-size:13px">${v.receiver_state}${v.receiver_state_code ? ` (${v.receiver_state_code})` : ''}</div>
+      </div>` : ''}
+    </div>
+
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-2);margin-bottom:8px;letter-spacing:.05em">💰 Financeiro</div>
+    <div>
+      ${row('Data', fmt.date(v.date))}
+      ${row('Qtd. × Valor Unit.', `${v.quantity} × ${M(v.unit_price)}`)}
+      ${row('Faturamento ML', M(v.faturamento), 'var(--text)')}
+      ${row('Custo (-)', M(v.custo))}
+      ${row('Imposto (-)', `${M(v.imposto)} (${v.tax_rate}%)`)}
+      ${row('Tarifa de Venda (-)', M(v.tarifa))}
+      ${row('Frete Comprador (-)', M(v.frete_comprador))}
+      ${row('Frete Vendedor (-)', M(v.frete_vendedor))}
+      ${row('Margem Contrib. (=)', M(v.margem), mc_cls)}
+      ${row('MC %', v.mc_pct.toFixed(1) + '%', mc_cls)}
+    </div>
+  `);
+};
+
 window.vtClearDates = () => {
   const f = document.getElementById('vtDateFrom');
   const t = document.getElementById('vtDateTo');
@@ -2990,8 +3053,9 @@ async function vtLoad() {
 
     const rows = vendas.map(v => {
       const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
+      _vtCache.set(`${v.order_id}_${v.item_id}`, v);
       return `
-        <tr style="border-bottom:1px solid var(--border)">
+        <tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="vtOpenDetail('${v.order_id}','${v.item_id}')">
           <td style="${td};min-width:150px;max-width:200px">
             <div style="display:flex;align-items:center;gap:6px">
               ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:28px;height:28px;object-fit:cover;border-radius:3px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : ''}
