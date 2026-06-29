@@ -2974,7 +2974,7 @@ async function vtLoad() {
           <td style="max-width:260px">
             <div style="display:flex;align-items:center;gap:8px">
               ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : `<div style="width:36px;height:36px;background:var(--surface-2);border-radius:4px;flex-shrink:0;border:1px solid var(--border)"></div>`}
-              <span style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.item_title}">${v.item_title}</span>
+              <span style="font-size:12px;line-height:1.3;word-break:break-word" title="${v.item_title}">${v.item_title}</span>
             </div>
           </td>
           <td>
