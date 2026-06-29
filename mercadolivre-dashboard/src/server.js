@@ -252,7 +252,7 @@ for (const col of [
   "ALTER TABLE stores ADD COLUMN last_error TEXT DEFAULT ''",
   "ALTER TABLE stores ADD COLUMN last_error_at INTEGER DEFAULT 0",
   "ALTER TABLE stores ADD COLUMN sync_status TEXT DEFAULT 'idle'",
-  "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT (unixepoch())",
+  "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT 0",
   "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
   // Audit table index
   "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
