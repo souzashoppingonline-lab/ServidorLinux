@@ -1624,7 +1624,7 @@ route('GET', '/api/stores', (req, res, sess) => {
     SELECT s.id, s.nickname, s.email, s.site_id, s.permalink, s.thumbnail,
            s.created_at, s.last_sync, s.status, s.store_color, s.store_icon,
            s.account_type, s.sync_status, s.last_error, s.last_error_at,
-           s.country_id, s.currency_id, s.connected_at,
+           s.country_id, s.currency_id, s.connected_at, s.tax_rate,
            (SELECT sl.status FROM sync_log sl WHERE sl.store_id=s.id ORDER BY sl.last_sync DESC LIMIT 1) as last_sync_status,
            (SELECT COUNT(*) FROM orders WHERE store_id=s.id AND status='paid') as total_orders,
            (SELECT COUNT(*) FROM listings WHERE store_id=s.id AND status='active') as active_listings
