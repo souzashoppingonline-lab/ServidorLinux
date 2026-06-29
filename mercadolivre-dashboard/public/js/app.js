@@ -2168,6 +2168,12 @@ async function renderScheduler() {
 
       const fmtTs = (ts) => ts ? new Date(ts * 1000).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
       const fmtMs = (ms) => ms != null ? `${ms}ms` : '-';
+      const storeBadge = (j) => {
+        const color = j.store_color || '#FFE600';
+        const icon  = j.store_icon  || '🏪';
+        const name  = j.store_name  || j.store_id;
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;background:${color}22;border:1px solid ${color};color:var(--text-1)">${icon} ${name}</span>`;
+      };
 
       const html = `
         <div class="page-header">
@@ -2223,7 +2229,7 @@ async function renderScheduler() {
                 <tbody>
                   ${syncLogs.length ? syncLogs.map(l => `
                     <tr>
-                      <td style="font-size:12px;color:var(--text-2)">${l.store_id}</td>
+                      <td>${storeBadge(l)}</td>
                       <td style="font-weight:600">${l.entity}</td>
                       <td>${l.status === 'ok' ? '<span class="badge badge-green">OK</span>' : `<span class="badge badge-red">${l.status}</span>`}</td>
                       <td class="td-light" style="font-size:12px">${fmtTs(l.last_sync)}</td>
@@ -2245,7 +2251,7 @@ async function renderScheduler() {
                 ${pendingJobs.map(j => `
                   <tr>
                     <td style="font-weight:600;font-family:monospace;font-size:13px">${j.type}</td>
-                    <td style="color:var(--text-2)">${j.store_id}</td>
+                    <td>${storeBadge(j)}</td>
                     <td><span class="badge badge-blue">${j.priority}</span></td>
                     <td class="td-light" style="font-size:12px">${fmtTs(j.scheduled_at)}</td>
                     <td>${j.attempts}</td>
@@ -2265,7 +2271,7 @@ async function renderScheduler() {
                 ${recentJobs.length ? recentJobs.map(j => `
                   <tr>
                     <td style="font-weight:600;font-family:monospace;font-size:12px">${j.type}</td>
-                    <td style="color:var(--text-2);font-size:12px">${j.store_id}</td>
+                    <td>${storeBadge(j)}</td>
                     <td>${jobStatusBadge(j.status)}</td>
                     <td style="text-align:center">${j.attempts}</td>
                     <td class="td-light">${fmtMs(j.duration_ms)}</td>

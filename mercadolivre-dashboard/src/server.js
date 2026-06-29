@@ -1919,9 +1919,22 @@ route('GET', '/api/scheduler/status', (req, res, sess) => {
   const failedToday = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='failed' AND completed_at >= unixepoch('now','start of day')").get().n;
   const retriesToday = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE attempts > 1 AND created_at >= unixepoch('now','start of day')").get().n;
   const avgDuration = db.prepare("SELECT AVG(duration_ms) as avg FROM job_queue WHERE status='completed' AND completed_at >= unixepoch()-3600").get().avg || 0;
-  const recentJobs = db.prepare("SELECT type, store_id, status, attempts, duration_ms, error, created_at, completed_at FROM job_queue ORDER BY id DESC LIMIT 20").all();
-  const syncLogs = db.prepare("SELECT * FROM sync_log").all();
-  const pendingJobs = db.prepare("SELECT type, store_id, priority, scheduled_at, attempts FROM job_queue WHERE status='pending' ORDER BY priority, scheduled_at LIMIT 10").all();
+  const recentJobs = db.prepare(`
+    SELECT j.type, j.store_id, s.nickname as store_name, s.store_color, s.store_icon,
+           j.status, j.attempts, j.duration_ms, j.error, j.created_at, j.completed_at
+    FROM job_queue j LEFT JOIN stores s ON s.id=j.store_id
+    ORDER BY j.id DESC LIMIT 20
+  `).all();
+  const syncLogs = db.prepare(`
+    SELECT l.*, s.nickname as store_name, s.store_color, s.store_icon
+    FROM sync_log l LEFT JOIN stores s ON s.id=l.store_id
+  `).all();
+  const pendingJobs = db.prepare(`
+    SELECT j.type, j.store_id, s.nickname as store_name, s.store_color, s.store_icon,
+           j.priority, j.scheduled_at, j.attempts
+    FROM job_queue j LEFT JOIN stores s ON s.id=j.store_id
+    WHERE j.status='pending' ORDER BY j.priority, j.scheduled_at LIMIT 10
+  `).all();
   const apiStats = db.prepare("SELECT COUNT(*) as calls, AVG(duration_ms) as avg_ms, SUM(CASE WHEN status_code=429 THEN 1 ELSE 0 END) as rate_limits FROM api_log WHERE logged_at >= unixepoch()-3600").get();
   const recentApiLogs = db.prepare("SELECT endpoint, status_code, duration_ms, rate_limit_remaining, logged_at FROM api_log ORDER BY id DESC LIMIT 10").all();
 
