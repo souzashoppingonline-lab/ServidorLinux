@@ -3080,6 +3080,19 @@ async function vtLoad() {
 }
 
 // ============================================================
+// SIDEBAR COLLAPSE
+// ============================================================
+window.toggleSidebarCollapse = () => {
+  const collapsed = document.body.classList.toggle('sidebar-collapsed');
+  localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
+};
+
+// ============================================================
 // BOOT
 // ============================================================
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  if (localStorage.getItem('sidebarCollapsed') === '1') {
+    document.body.classList.add('sidebar-collapsed');
+  }
+  init();
+});

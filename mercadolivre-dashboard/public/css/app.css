@@ -1318,3 +1318,26 @@ tr:hover td { background: #fafafa; }
 .listing-card--promo {
   border-left: 3px solid #ff6900;
 }
+
+/* ============================================================
+   SIDEBAR COLLAPSED MODE
+   ============================================================ */
+body.sidebar-collapsed .sidebar { width: 56px; }
+body.sidebar-collapsed .sidebar-logo-name,
+body.sidebar-collapsed .sidebar-logo-sub,
+body.sidebar-collapsed .nav-label,
+body.sidebar-collapsed .nav-badge,
+body.sidebar-collapsed .nav-section-title,
+body.sidebar-collapsed .nav-divider,
+body.sidebar-collapsed .sidebar-user-info,
+body.sidebar-collapsed .sidebar-user-role { display: none; }
+body.sidebar-collapsed .sidebar-header { padding: 14px 8px; }
+body.sidebar-collapsed .sidebar-logo { justify-content: center; }
+body.sidebar-collapsed .sidebar-nav { padding: 10px 6px; }
+body.sidebar-collapsed .nav-item { justify-content: center; padding: 10px 0; }
+body.sidebar-collapsed .nav-icon { width: 24px; font-size: 18px; }
+body.sidebar-collapsed .sidebar-footer { justify-content: center; padding: 10px 6px; }
+body.sidebar-collapsed .main-wrapper { margin-left: 56px; }
+body.sidebar-collapsed .btn-collapse-sidebar .icon-open  { display: none; }
+body.sidebar-collapsed .btn-collapse-sidebar .icon-close { display: inline; }
+.btn-collapse-sidebar .icon-close { display: none; }

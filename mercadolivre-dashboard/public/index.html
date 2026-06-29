@@ -18,6 +18,10 @@
           <div class="sidebar-logo-sub">CFO Suite</div>
         </div>
       </div>
+      <button class="btn-collapse-sidebar" id="btnCollapseSidebar" title="Recolher menu" onclick="toggleSidebarCollapse()" style="margin-top:10px;width:100%;background:rgba(255,255,255,0.08);border:none;border-radius:6px;padding:6px;color:rgba(255,255,255,0.6);cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px;transition:background .2s" onmouseover="this.style.background='rgba(255,255,255,0.14)'" onmouseout="this.style.background='rgba(255,255,255,0.08)'">
+        <span class="icon-open">◀ Recolher</span>
+        <span class="icon-close">▶</span>
+      </button>
     </div>
 
     <nav class="sidebar-nav">
@@ -30,7 +34,7 @@
       <a href="#orders"     class="nav-item" data-page="orders">
         <span class="nav-icon">🛒</span><span class="nav-label">Pedidos</span>
       </a>
-      <a href="#vendas-totais" class="nav-item" data-page="vendas-totais" style="padding-left:28px">
+      <a href="#vendas-totais" class="nav-item" data-page="vendas-totais">
         <span class="nav-icon">💰</span><span class="nav-label">Vendas Totais</span>
       </a>
       <a href="#questions"  class="nav-item" data-page="questions">
