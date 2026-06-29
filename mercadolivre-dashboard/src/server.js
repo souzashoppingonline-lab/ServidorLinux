@@ -642,14 +642,15 @@ const JOB_HANDLERS = {
     } else {
       from = new Date(lastSync * 1000 - 300000).toISOString(); // 5min overlap
     }
-    const fromStr = from.split('T')[0];
+    // Use full datetime to avoid re-fetching all orders from midnight on each sync
+    const fromISO = from.slice(0, 19).replace('T', 'T') + '.000-03:00';
 
-    console.log(`[sync] orders store=${storeId} from=${fromStr}`);
+    console.log(`[sync] orders store=${storeId} from=${fromISO.slice(0,16)}`);
     let offset = 0, total = 0;
 
     while (true) {
       const page = await mlFetch(
-        `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${fromStr}T00:00:00.000-03:00&limit=50&offset=${offset}&sort=date_asc`,
+        `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${encodeURIComponent(fromISO)}&limit=50&offset=${offset}&sort=date_asc`,
         {}, storeId
       );
       if (!page?.results?.length) break;
