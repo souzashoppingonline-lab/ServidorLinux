@@ -255,6 +255,8 @@ for (const col of [
   "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT 0",
   "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
   "ALTER TABLE stores ADD COLUMN tax_rate REAL DEFAULT 0",
+  "ALTER TABLE orders ADD COLUMN shipping_cost REAL DEFAULT 0",
+  "ALTER TABLE order_items ADD COLUMN sale_fee REAL DEFAULT 0",
   // Audit table index
   "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_api_log_store ON api_log(store_id, logged_at DESC)",
@@ -652,23 +654,25 @@ const JOB_HANDLERS = {
       );
       if (!page?.results?.length) break;
 
-      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
-      const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id) VALUES(?,?,?,?,?,?,?)`);
+      const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
 
       db.transaction((orders) => {
         for (const o of orders) {
           const addr = o.shipping?.receiver_address || {};
+          const shippingCost = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
           insertOrder.run(
             o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
             String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'',
             addr.city?.name || addr.city || '',
             addr.state?.name || addr.state || '',
-            addr.state?.id || addr.state_code || ''
+            addr.state?.id || addr.state_code || '',
+            shippingCost
           );
           deleteItems.run(o.id);
           for (const item of (o.order_items||[])) {
-            insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'');
+            insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
           }
         }
       })(page.results);
@@ -1692,7 +1696,9 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
   const rows = db.prepare(`
     SELECT
       oi.order_id, oi.item_id, oi.item_title, oi.quantity, oi.unit_price,
+      COALESCE(oi.sale_fee, 0) AS sale_fee,
       o.date_created, o.store_id, o.total_amount,
+      COALESCE(o.shipping_cost, 0) AS shipping_cost,
       s.nickname  AS store_name,
       s.store_color,
       s.store_icon,
@@ -1717,13 +1723,12 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
   `).get(...params).n;
 
   const vendas = rows.map(r => {
-    const fat      = r.faturamento || 0;
-    const custo    = r.oc_cost     || 0;
+    const fat      = r.faturamento  || 0;
+    const custo    = r.oc_cost      || 0;
     const imposto  = fat * (r.tax_rate / 100);
-    // tarifa_venda, frete_comprador, frete_vendedor — not stored in DB yet (show 0)
-    const tarifa   = 0;
-    const frete_c  = 0;
-    const frete_v  = 0;
+    const tarifa   = r.sale_fee     || 0;
+    const frete_c  = 0; // frete comprador não está disponível na API
+    const frete_v  = r.shipping_cost || 0;
     const margem   = fat - custo - imposto - tarifa - frete_c - frete_v;
     const mc_pct   = fat > 0 ? (margem / fat) * 100 : 0;
     return {
