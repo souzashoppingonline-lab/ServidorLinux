@@ -3234,6 +3234,168 @@ function broadcast(type, data) {
   }
 }
 
+// ── Alerta de Reposição ────────────────────────────────────
+route('GET', '/api/reposicao', (req, res, sess) => {
+  const p = qp(req);
+  const storeFilter = p.get('storeId') || null;
+  const days7  = new Date(Date.now() -  7 * 86400000).toISOString();
+  const days14 = new Date(Date.now() - 14 * 86400000).toISOString();
+  const days30 = new Date(Date.now() - 30 * 86400000).toISOString();
+
+  try {
+    const storeWhere = storeFilter ? `AND oi.store_id = '${storeFilter}'` : '';
+
+    // Vendas dos últimos 7 dias por produto
+    const sales7 = db.prepare(`
+      SELECT oi.item_id, oi.item_title, oi.store_id, s.nickname as loja,
+             SUM(oi.quantity) as unidades_7d,
+             COUNT(DISTINCT o.id) as pedidos_7d,
+             ROUND(SUM(oi.unit_price * oi.quantity), 2) as fat_7d
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN stores s ON s.id = oi.store_id
+      WHERE o.status='paid' AND o.date_created >= ? ${storeWhere}
+      GROUP BY oi.item_id, oi.store_id
+    `).all(days7);
+
+    // Vendas dos 7 dias anteriores (comparação)
+    const sales14 = db.prepare(`
+      SELECT oi.item_id, oi.store_id, SUM(oi.quantity) as unidades_prev
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      WHERE o.status='paid' AND o.date_created >= ? AND o.date_created < ? ${storeWhere}
+      GROUP BY oi.item_id, oi.store_id
+    `).all(days14, days7);
+    const prevMap = {};
+    sales14.forEach(r => { prevMap[`${r.item_id}_${r.store_id}`] = r.unidades_prev; });
+
+    // Estoque atual (listings)
+    const estoques = db.prepare(`
+      SELECT id, store_id, available_quantity, sold_quantity, status FROM listings
+    `).all();
+    const estoqueMap = {};
+    estoques.forEach(l => { estoqueMap[`${l.id}_${l.store_id}`] = l; });
+
+    const alertas = [];
+    for (const item of sales7) {
+      const key = `${item.item_id}_${item.store_id}`;
+      const listing = estoqueMap[key] || {};
+      const estoque = listing.available_quantity || 0;
+      const vendas7 = item.unidades_7d || 0;
+      const vendaAnterior = prevMap[key] || 0;
+
+      // Ritmo diário de vendas (últimos 7 dias)
+      const ritmoDiario = vendas7 / 7;
+      // Dias de estoque restante
+      const diasEstoque = ritmoDiario > 0 ? Math.floor(estoque / ritmoDiario) : 999;
+      // Variação em relação à semana anterior
+      const variacao = vendaAnterior > 0 ? Math.round(((vendas7 - vendaAnterior) / vendaAnterior) * 100) : null;
+
+      // Nível de urgência
+      let urgencia = 'ok';
+      if (diasEstoque <= 3)       urgencia = 'critico';
+      else if (diasEstoque <= 7)  urgencia = 'alto';
+      else if (diasEstoque <= 14) urgencia = 'medio';
+      else if (vendas7 > (vendaAnterior * 1.3)) urgencia = 'crescendo'; // acelerou 30%+
+
+      if (urgencia === 'ok') continue; // só mostra os que precisam de atenção
+
+      alertas.push({
+        item_id:      item.item_id,
+        titulo:       item.item_title,
+        loja:         item.loja,
+        store_id:     item.store_id,
+        estoque:      estoque,
+        vendas_7d:    vendas7,
+        vendas_prev:  vendaAnterior,
+        variacao_pct: variacao,
+        ritmo_diario: Math.round(ritmoDiario * 10) / 10,
+        dias_estoque: diasEstoque === 999 ? null : diasEstoque,
+        fat_7d:       item.fat_7d,
+        urgencia,
+      });
+    }
+
+    // Ordena: crítico primeiro, depois por faturamento
+    const ordem = { critico: 0, alto: 1, medio: 2, crescendo: 3 };
+    alertas.sort((a, b) => (ordem[a.urgencia] - ordem[b.urgencia]) || (b.fat_7d - a.fat_7d));
+
+    ok(res, { alertas, total: alertas.length, gerado_em: new Date().toISOString() });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// ── Taxa de Cancelamento ───────────────────────────────────
+route('GET', '/api/cancelamentos', (req, res, sess) => {
+  const p = qp(req);
+  const storeFilter = p.get('storeId') || null;
+  const days = parseInt(p.get('days') || '30');
+  const fromDate = new Date(Date.now() - days * 86400000).toISOString();
+  const storeWhere = storeFilter ? `AND o.store_id = '${storeFilter}'` : '';
+
+  try {
+    // Total de pedidos (pagos + cancelados) por produto
+    const rows = db.prepare(`
+      SELECT
+        oi.item_id,
+        oi.item_title,
+        oi.store_id,
+        s.nickname as loja,
+        COUNT(DISTINCT CASE WHEN o.status='paid'      THEN o.id END) as pedidos_pagos,
+        COUNT(DISTINCT CASE WHEN o.status='cancelled' THEN o.id END) as pedidos_cancelados,
+        COUNT(DISTINCT o.id) as pedidos_total,
+        ROUND(SUM(CASE WHEN o.status='paid' THEN oi.unit_price * oi.quantity ELSE 0 END), 2) as faturamento,
+        ROUND(100.0 * COUNT(DISTINCT CASE WHEN o.status='cancelled' THEN o.id END)
+              / NULLIF(COUNT(DISTINCT o.id), 0), 1) as taxa_cancelamento
+      FROM order_items oi
+      JOIN orders o ON o.id = oi.order_id
+      JOIN stores s ON s.id = oi.store_id
+      WHERE o.date_created >= ? ${storeWhere}
+      GROUP BY oi.item_id, oi.store_id
+      HAVING pedidos_total >= 3
+      ORDER BY taxa_cancelamento DESC, pedidos_cancelados DESC
+    `).all(fromDate);
+
+    // Resumo geral por loja
+    const porLoja = db.prepare(`
+      SELECT
+        s.nickname as loja,
+        o.store_id,
+        COUNT(DISTINCT CASE WHEN o.status='paid'      THEN o.id END) as pagos,
+        COUNT(DISTINCT CASE WHEN o.status='cancelled' THEN o.id END) as cancelados,
+        COUNT(DISTINCT o.id) as total,
+        ROUND(100.0 * COUNT(DISTINCT CASE WHEN o.status='cancelled' THEN o.id END)
+              / NULLIF(COUNT(DISTINCT o.id), 0), 1) as taxa
+      FROM orders o
+      JOIN stores s ON s.id = o.store_id
+      WHERE o.date_created >= ? ${storeWhere}
+      GROUP BY o.store_id
+    `).all(fromDate);
+
+    // Tendência diária de cancelamentos (últimos 30 dias)
+    const tendencia = db.prepare(`
+      SELECT
+        DATE(o.date_created) as dia,
+        COUNT(DISTINCT CASE WHEN o.status='paid'      THEN o.id END) as pagos,
+        COUNT(DISTINCT CASE WHEN o.status='cancelled' THEN o.id END) as cancelados
+      FROM orders o
+      WHERE o.date_created >= ? ${storeWhere}
+      GROUP BY dia ORDER BY dia
+    `).all(fromDate);
+
+    ok(res, {
+      produtos: rows,
+      por_loja: porLoja,
+      tendencia,
+      periodo_dias: days,
+      gerado_em: new Date().toISOString(),
+    });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
 // ============================================================
 // TOKEN REFRESH JOB
 // ============================================================

@@ -112,6 +112,8 @@ const PAGES = {
   ads:              renderAds,
   customers:        renderCustomers,
   'vendas-totais':  renderVendasTotais,
+  reposicao:        renderReposicao,
+  cancelamentos:    renderCancelamentos,
 };
 
 const PAGE_TITLES = {
@@ -130,6 +132,8 @@ const PAGE_TITLES = {
   ads:              'Publicidade (Mercado Ads)',
   customers:        'Clientes',
   'vendas-totais':  'Vendas Totais',
+  reposicao:        'Alertas de Reposição',
+  cancelamentos:    'Taxa de Cancelamento',
 };
 
 function navigate(page) {
@@ -3270,6 +3274,198 @@ window.toggleSidebarCollapse = () => {
   const collapsed = document.body.classList.toggle('sidebar-collapsed');
   localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0');
 };
+
+// ============================================================
+// ALERTA DE REPOSIÇÃO
+// ============================================================
+async function renderReposicao() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Carregando alertas...</p></div>`;
+
+  let data;
+  try {
+    const storeId = State.currentStore?.id || '';
+    const url = `/api/reposicao${storeId ? `?storeId=${storeId}` : ''}`;
+    data = await API.get(url);
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro ao carregar alertas: ${e.message}</p></div>`;
+    return;
+  }
+
+  const urgMap = {
+    critico:   { label: 'CRÍTICO',    cls: 'badge-red',    icon: '🔴' },
+    alto:      { label: 'ALTO',       cls: 'badge-orange', icon: '🟠' },
+    medio:     { label: 'MÉDIO',      cls: 'badge-yellow', icon: '🟡' },
+    crescendo: { label: 'CRESCENDO',  cls: 'badge-blue',   icon: '📈' },
+  };
+
+  // Atualiza badge no menu
+  const badge = document.getElementById('reposicaoBadge');
+  const criticos = data.alertas.filter(a => a.urgencia === 'critico' || a.urgencia === 'alto').length;
+  if (badge) { badge.textContent = criticos; badge.style.display = criticos > 0 ? '' : 'none'; }
+
+  const rows = data.alertas.map(a => {
+    const u = urgMap[a.urgencia] || { label: a.urgencia, cls: 'badge-gray', icon: '⚪' };
+    const diasHtml = a.dias_estoque === null
+      ? '<span style="color:#888">—</span>'
+      : a.dias_estoque <= 3
+        ? `<strong style="color:#ef4444">${a.dias_estoque}d</strong>`
+        : `<span>${a.dias_estoque}d</span>`;
+    const varHtml = a.variacao_pct === null ? '—'
+      : a.variacao_pct > 0 ? `<span style="color:#22c55e">+${a.variacao_pct}%</span>`
+      : `<span style="color:#ef4444">${a.variacao_pct}%</span>`;
+    return `<tr>
+      <td><span class="badge ${u.cls}">${u.icon} ${u.label}</span></td>
+      <td style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${a.titulo}">${a.titulo}</td>
+      <td>${a.loja}</td>
+      <td style="text-align:center">${a.estoque}</td>
+      <td style="text-align:center">${a.vendas_7d}</td>
+      <td style="text-align:center">${a.ritmo_diario}/dia</td>
+      <td style="text-align:center">${diasHtml}</td>
+      <td style="text-align:center">${varHtml}</td>
+      <td style="text-align:right">${fmt.brl(a.fat_7d)}</td>
+    </tr>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="page-header">
+      <h2>Alertas de Reposição</h2>
+      <span style="color:#888;font-size:13px">${data.total} produto(s) precisam de atenção</span>
+    </div>
+
+    <div class="cards-row" style="margin-bottom:20px">
+      ${['critico','alto','medio','crescendo'].map(u => {
+        const count = data.alertas.filter(a => a.urgencia === u).length;
+        const m = urgMap[u];
+        return `<div class="card" style="flex:1;min-width:120px;text-align:center">
+          <div style="font-size:28px">${m.icon}</div>
+          <div style="font-size:24px;font-weight:700">${count}</div>
+          <div style="font-size:12px;color:#888">${m.label}</div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    ${data.alertas.length === 0
+      ? `<div class="empty-state"><p>Nenhum alerta de reposição. Estoque OK!</p></div>`
+      : `<div class="card" style="overflow:auto">
+          <table class="table">
+            <thead><tr>
+              <th>Urgência</th><th>Produto</th><th>Loja</th>
+              <th style="text-align:center">Estoque</th>
+              <th style="text-align:center">Vendas 7d</th>
+              <th style="text-align:center">Ritmo</th>
+              <th style="text-align:center">Dias restantes</th>
+              <th style="text-align:center">vs sem. ant.</th>
+              <th style="text-align:right">Fat. 7d</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`
+    }
+    <p style="color:#888;font-size:12px;margin-top:12px">
+      Atualizado em ${new Date(data.gerado_em).toLocaleString('pt-BR')} •
+      Estoque zerado ou &lt;3 dias = CRÍTICO • &lt;7 dias = ALTO • &lt;14 dias = MÉDIO • vendas acelerando 30%+ = CRESCENDO
+    </p>`;
+}
+
+// ============================================================
+// TAXA DE CANCELAMENTO
+// ============================================================
+async function renderCancelamentos() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Carregando cancelamentos...</p></div>`;
+
+  const days = 30;
+  let data;
+  try {
+    const storeId = State.currentStore?.id || '';
+    const url = `/api/cancelamentos?days=${days}${storeId ? `&storeId=${storeId}` : ''}`;
+    data = await API.get(url);
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro ao carregar cancelamentos: ${e.message}</p></div>`;
+    return;
+  }
+
+  // Cards por loja
+  const lojaCards = data.por_loja.map(l => `
+    <div class="card" style="flex:1;min-width:160px">
+      <div style="font-weight:600;margin-bottom:8px">${l.loja}</div>
+      <div style="font-size:28px;font-weight:700;color:${l.taxa > 10 ? '#ef4444' : l.taxa > 5 ? '#f59e0b' : '#22c55e'}">${l.taxa}%</div>
+      <div style="font-size:12px;color:#888;margin-top:4px">${l.cancelados} cancelados / ${l.total} pedidos</div>
+    </div>`).join('');
+
+  // Tabela de produtos
+  const prodRows = data.produtos.map(p => {
+    const cor = p.taxa_cancelamento > 15 ? '#ef4444' : p.taxa_cancelamento > 7 ? '#f59e0b' : '#22c55e';
+    return `<tr>
+      <td style="max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${p.item_title}">${p.item_title}</td>
+      <td>${p.loja}</td>
+      <td style="text-align:center">${p.pedidos_pagos}</td>
+      <td style="text-align:center;color:#ef4444">${p.pedidos_cancelados}</td>
+      <td style="text-align:center;font-weight:700;color:${cor}">${p.taxa_cancelamento}%</td>
+      <td style="text-align:right">${fmt.brl(p.faturamento)}</td>
+    </tr>`;
+  }).join('');
+
+  content.innerHTML = `
+    <div class="page-header">
+      <h2>Taxa de Cancelamento — últimos ${days} dias</h2>
+    </div>
+
+    <div class="cards-row" style="margin-bottom:20px">
+      ${lojaCards}
+    </div>
+
+    <div class="card" style="overflow:auto">
+      <div style="font-weight:600;margin-bottom:12px">Produtos com maior cancelamento <span style="color:#888;font-size:12px">(mín. 3 pedidos)</span></div>
+      ${data.produtos.length === 0
+        ? `<p style="color:#888">Nenhum cancelamento no período.</p>`
+        : `<table class="table">
+            <thead><tr>
+              <th>Produto</th><th>Loja</th>
+              <th style="text-align:center">Pagos</th>
+              <th style="text-align:center">Cancelados</th>
+              <th style="text-align:center">Taxa</th>
+              <th style="text-align:right">Faturamento</th>
+            </tr></thead>
+            <tbody>${prodRows}</tbody>
+          </table>`
+      }
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <div style="font-weight:600;margin-bottom:12px">Tendência diária de cancelamentos</div>
+      <canvas id="chartCancelamentos" height="100"></canvas>
+    </div>`;
+
+  // Gráfico de tendência
+  const ctx = document.getElementById('chartCancelamentos');
+  if (ctx && data.tendencia.length > 0) {
+    State.charts['cancelamentos'] = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: data.tendencia.map(d => d.dia.slice(5)),
+        datasets: [
+          {
+            label: 'Pagos',
+            data: data.tendencia.map(d => d.pagos),
+            backgroundColor: 'rgba(34,197,94,0.6)',
+          },
+          {
+            label: 'Cancelados',
+            data: data.tendencia.map(d => d.cancelados),
+            backgroundColor: 'rgba(239,68,68,0.7)',
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'top' } },
+        scales: { x: { stacked: false }, y: { beginAtZero: true } },
+      },
+    });
+  }
+}
 
 // ============================================================
 // BOOT
