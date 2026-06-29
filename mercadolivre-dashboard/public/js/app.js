@@ -2983,50 +2983,46 @@ async function vtLoad() {
     const { vendas, paging } = data;
 
     const M = fmt.brl;
-    const thStyle = 'padding:8px 10px;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-2);white-space:nowrap;cursor:pointer;user-select:none';
-    const sortArrow = (col) => VT.sort === col ? (VT.order === 'asc' ? ' ▲' : ' ▼') : '';
+    const p = 'padding:4px 6px';
+    const th = `${p};font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text-2);cursor:pointer;user-select:none;white-space:nowrap`;
+    const td = `${p};font-size:11px;vertical-align:middle`;
+    const sortArrow = (col) => VT.sort === col ? (VT.order === 'asc' ? '▲' : '▼') : '';
 
     const rows = vendas.map(v => {
       const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
       return `
-        <tr>
-          <td style="max-width:260px">
-            <div style="display:flex;align-items:center;gap:8px">
-              ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : `<div style="width:36px;height:36px;background:var(--surface-2);border-radius:4px;flex-shrink:0;border:1px solid var(--border)"></div>`}
-              <span style="font-size:12px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical" title="${v.item_title}">${v.item_title}</span>
+        <tr style="border-bottom:1px solid var(--border)">
+          <td style="${td};min-width:150px;max-width:200px">
+            <div style="display:flex;align-items:center;gap:6px">
+              ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:28px;height:28px;object-fit:cover;border-radius:3px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : ''}
+              <span style="line-height:1.3;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical" title="${v.item_title}">${v.item_title}</span>
             </div>
           </td>
-          <td>
-            <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
+          <td style="${td};white-space:nowrap">
+            <span style="display:inline-flex;align-items:center;gap:3px;padding:1px 5px;border-radius:8px;font-size:10px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
               ${v.store_icon||'🏪'} ${v.store_name}
             </span>
           </td>
-          <td style="font-family:monospace;font-size:11px;color:var(--text-2)">${v.sku||'-'}</td>
-          <td style="font-size:12px;white-space:nowrap">${fmt.date(v.date)}</td>
-          <td style="text-align:right;font-size:12px;color:var(--text-3)">-</td>
-          <td style="text-align:right;font-size:12px">${M(v.unit_price)}</td>
-          <td style="text-align:center;font-size:12px">${v.quantity}</td>
-          <td style="text-align:right;font-weight:700;font-size:12px">${M(v.faturamento)}</td>
-          <td style="text-align:right">
-            <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end">
-              <input
-                id="cost_${v.order_id}_${v.item_id}"
-                type="number" step="0.01" min="0"
-                value="${v.custo.toFixed(2)}"
-                readonly
-                style="width:80px;font-size:12px;text-align:right;border:1px solid var(--border);border-radius:4px;padding:2px 4px;background:var(--surface);color:var(--text)"
-                onclick="vtEditCost('${v.order_id}','${v.item_id}','${v.store_id}',${v.custo})"
-                onblur="vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}')"
-                onkeydown="if(event.key==='Enter'){vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}');this.blur()}"
-              >
-            </div>
+          <td style="${td};color:var(--text-3);font-size:10px">${v.sku||'-'}</td>
+          <td style="${td};white-space:nowrap">${fmt.date(v.date)}</td>
+          <td style="${td};text-align:right;color:var(--text-3)">-</td>
+          <td style="${td};text-align:right">${M(v.unit_price)}</td>
+          <td style="${td};text-align:center">${v.quantity}</td>
+          <td style="${td};text-align:right;font-weight:700">${M(v.faturamento)}</td>
+          <td style="${td};text-align:right">
+            <input id="cost_${v.order_id}_${v.item_id}" type="number" step="0.01" min="0"
+              value="${v.custo.toFixed(2)}" readonly
+              style="width:64px;font-size:11px;text-align:right;border:1px solid var(--border);border-radius:4px;padding:2px 3px;background:var(--surface);color:var(--text)"
+              onclick="vtEditCost('${v.order_id}','${v.item_id}','${v.store_id}',${v.custo})"
+              onblur="vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}')"
+              onkeydown="if(event.key==='Enter'){vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}');this.blur()}">
           </td>
-          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.imposto)} <span style="font-size:10px">(${v.tax_rate}%)</span></td>
-          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.tarifa)}</td>
-          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.frete_comprador)}</td>
-          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.frete_vendedor)}</td>
-          <td style="text-align:right;font-weight:700;font-size:12px;color:${mc_cls}">${M(v.margem)}</td>
-          <td style="text-align:right;font-weight:700;font-size:12px;color:${mc_cls}">${v.mc_pct.toFixed(1)}%</td>
+          <td style="${td};text-align:right;color:var(--text-2)">${M(v.imposto)}<div style="font-size:9px;color:var(--text-3)">${v.tax_rate}%</div></td>
+          <td style="${td};text-align:right;color:var(--text-2)">${M(v.tarifa)}</td>
+          <td style="${td};text-align:right;color:var(--text-2)">${M(v.frete_comprador)}</td>
+          <td style="${td};text-align:right;color:var(--text-2)">${M(v.frete_vendedor)}</td>
+          <td style="${td};text-align:right;font-weight:700;color:${mc_cls}">${M(v.margem)}</td>
+          <td style="${td};text-align:right;font-weight:700;color:${mc_cls}">${v.mc_pct.toFixed(1)}%</td>
         </tr>
       `;
     }).join('');
@@ -3042,25 +3038,25 @@ async function vtLoad() {
     ` : `<div style="font-size:12px;color:var(--text-2);text-align:center;margin-top:8px">${paging.total} registro${paging.total !== 1 ? 's' : ''}</div>`;
 
     wrap.innerHTML = `
-      <div class="card" style="overflow-x:auto">
-        <table style="width:100%;border-collapse:collapse">
+      <div class="card" style="overflow-x:auto;padding:0">
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
           <thead>
-            <tr style="border-bottom:2px solid var(--border)">
-              <th style="${thStyle}" onclick="vtSort('title')">Anúncio${sortArrow('title')}</th>
-              <th style="${thStyle}" onclick="vtSort('loja')">Conta${sortArrow('loja')}</th>
-              <th style="${thStyle}">SKU</th>
-              <th style="${thStyle}" onclick="vtSort('date')">Data${sortArrow('date')}</th>
-              <th style="${thStyle};text-align:right">Frete</th>
-              <th style="${thStyle};text-align:right">Valor Unit.</th>
-              <th style="${thStyle};text-align:center">Qtd.</th>
-              <th style="${thStyle};text-align:right" onclick="vtSort('faturamento')">Faturamento ML${sortArrow('faturamento')}</th>
-              <th style="${thStyle};text-align:right" onclick="vtSort('custo')">Custo (-)</th>
-              <th style="${thStyle};text-align:right">Imposto (-)</th>
-              <th style="${thStyle};text-align:right">Tarifa Venda (-)</th>
-              <th style="${thStyle};text-align:right">Frete Comprador (-)</th>
-              <th style="${thStyle};text-align:right">Frete Vendedor (-)</th>
-              <th style="${thStyle};text-align:right">Margem Contrib. (=)</th>
-              <th style="${thStyle};text-align:right">MC %</th>
+            <tr style="border-bottom:2px solid var(--border);background:var(--surface-2,#f8f9fa)">
+              <th style="${th}" onclick="vtSort('title')">Anúncio ${sortArrow('title')}</th>
+              <th style="${th}" onclick="vtSort('loja')">Conta ${sortArrow('loja')}</th>
+              <th style="${th}">SKU</th>
+              <th style="${th}" onclick="vtSort('date')">Data ${sortArrow('date')}</th>
+              <th style="${th};text-align:right">Frete</th>
+              <th style="${th};text-align:right">Unit.</th>
+              <th style="${th};text-align:center">Qtd</th>
+              <th style="${th};text-align:right" onclick="vtSort('faturamento')">Fat. ML ${sortArrow('faturamento')}</th>
+              <th style="${th};text-align:right" onclick="vtSort('custo')">Custo (-)</th>
+              <th style="${th};text-align:right">Imposto (-)</th>
+              <th style="${th};text-align:right">Tarifa (-)</th>
+              <th style="${th};text-align:right">Frete C. (-)</th>
+              <th style="${th};text-align:right">Frete V. (-)</th>
+              <th style="${th};text-align:right">Margem (=)</th>
+              <th style="${th};text-align:right">MC%</th>
             </tr>
           </thead>
           <tbody>
