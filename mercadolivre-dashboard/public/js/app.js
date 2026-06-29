@@ -2879,18 +2879,21 @@ window.openCustomer = async function(buyerId, nickname) {
 // ============================================================
 // VENDAS TOTAIS
 // ============================================================
+const _todayStr = () => new Date().toISOString().slice(0, 10);
 const VT = {
   offset: 0,
   limit: 50,
   sort: 'date',
   order: 'desc',
   storeFilter: '',
-  dateFrom: '',
-  dateTo: '',
+  dateFrom: _todayStr(),
+  dateTo: _todayStr(),
 };
 
 async function renderVendasTotais() {
   VT.offset = 0;
+  VT.dateFrom = _todayStr();
+  VT.dateTo   = _todayStr();
   setContent(`
     <div class="page-header">
       <div>
@@ -2909,6 +2912,12 @@ async function renderVendasTotais() {
     </div>
     <div id="vtContent"><div class="loading-state"><div class="spinner"></div><p>Carregando...</p></div></div>
   `);
+  // Pre-fill date inputs with today
+  const today = _todayStr();
+  const df = document.getElementById('vtDateFrom');
+  const dt = document.getElementById('vtDateTo');
+  if (df) df.value = VT.dateFrom || today;
+  if (dt) dt.value = VT.dateTo   || today;
   await vtLoad();
 }
 
