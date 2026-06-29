@@ -114,6 +114,7 @@ const PAGES = {
   'vendas-totais':  renderVendasTotais,
   reposicao:        renderReposicao,
   cancelamentos:    renderCancelamentos,
+  monitor:          renderMonitor,
   comparativo:      renderComparativo,
   evolucao:         renderEvolucao,
   'curva-abc':      renderCurvaABC,
@@ -137,6 +138,7 @@ const PAGE_TITLES = {
   'vendas-totais':  'Vendas Totais',
   reposicao:        'Alertas de Reposição',
   cancelamentos:    'Taxa de Cancelamento',
+  monitor:          'Monitor & Alertas Telegram',
   comparativo:      'Comparativo de Períodos',
   evolucao:         'Evolução Diária por Loja',
   'curva-abc':      'Curva ABC de Produtos',
@@ -3472,6 +3474,252 @@ async function renderCancelamentos() {
     });
   }
 }
+
+// ============================================================
+// MONITOR & ALERTAS TELEGRAM
+// ============================================================
+async function renderMonitor() {
+  const content = document.getElementById('content');
+  content.innerHTML = `<div class="loading-state"><div class="spinner"></div><p>Carregando monitor...</p></div>`;
+
+  let cfg, status;
+  try {
+    [cfg, status] = await Promise.all([
+      API.get('/api/monitor/config'),
+      API.get('/api/monitor/status'),
+    ]);
+  } catch (e) {
+    content.innerHTML = `<div class="empty-state"><p>Erro: ${e.message}</p></div>`;
+    return;
+  }
+
+  const toggle = (key, label, desc = '') => `
+    <label style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.06);cursor:pointer">
+      <div>
+        <div style="font-weight:500">${label}</div>
+        ${desc ? `<div style="font-size:12px;color:#888;margin-top:2px">${desc}</div>` : ''}
+      </div>
+      <div class="toggle-wrap" style="position:relative;width:42px;height:22px;flex-shrink:0;margin-left:16px">
+        <input type="checkbox" id="tog_${key}" ${cfg[key] ? 'checked' : ''} onchange="monitorSave()"
+          style="opacity:0;width:0;height:0;position:absolute">
+        <span onclick="document.getElementById('tog_${key}').click()"
+          style="position:absolute;inset:0;border-radius:22px;background:${cfg[key] ? '#FFE600' : '#444'};transition:.2s;cursor:pointer">
+          <span style="position:absolute;left:${cfg[key] ? '22px' : '2px'};top:2px;width:18px;height:18px;border-radius:50%;background:#111;transition:.2s"></span>
+        </span>
+      </div>
+    </label>`;
+
+  const q = status.scheduler;
+  const p = status.processo;
+  const errosBadge = q.failed > 0 ? `<span style="background:#ef4444;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;margin-left:6px">${q.failed} falhas</span>` : '';
+
+  content.innerHTML = `
+    <div class="page-header"><h2>Monitor & Alertas Telegram</h2></div>
+
+    <!-- STATUS AO VIVO -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:24px">
+
+      <div class="card" style="border-left:4px solid #22c55e">
+        <div style="font-size:11px;color:#888;margin-bottom:4px">PROCESSO</div>
+        <div style="font-size:15px;font-weight:600">🖥️ Ativo ${p.uptime_fmt}</div>
+        <div style="font-size:12px;color:#888">PID ${p.pid} • Node ${p.node_version}</div>
+        <div style="font-size:12px;color:#888">Memória: ${p.mem_mb} MB</div>
+      </div>
+
+      <div class="card" style="border-left:4px solid ${q.failed > 0 ? '#ef4444' : '#22c55e'}">
+        <div style="font-size:11px;color:#888;margin-bottom:4px">SCHEDULER ${errosBadge}</div>
+        <div style="font-size:13px">⏳ Pendentes: <b>${q.pending}</b> &nbsp; ⚙️ Rodando: <b>${q.running}</b></div>
+        <div style="font-size:13px">✅ Concluídos: <b>${q.completed}</b> &nbsp; 🔄 Retries: <b>${q.retries}</b></div>
+        <div style="font-size:12px;color:${q.failed>0?'#ef4444':'#888'}">❌ Falhas hoje: ${q.failed}</div>
+      </div>
+
+      <div class="card" style="border-left:4px solid #3b82f6">
+        <div style="font-size:11px;color:#888;margin-bottom:4px">ERROS (última 1h)</div>
+        <div style="font-size:28px;font-weight:700;color:${status.errosHora>0?'#ef4444':'#22c55e'}">${status.errosHora}</div>
+        <div style="font-size:12px;color:#888">falhas de sincronização</div>
+      </div>
+
+      <div class="card" style="border-left:4px solid #f59e0b">
+        <div style="font-size:11px;color:#888;margin-bottom:4px">ÚLTIMO ALERTA</div>
+        <div style="font-size:13px;font-weight:600">${status.last_alert_sent ? new Date(status.last_alert_sent).toLocaleString('pt-BR') : 'Nunca enviado'}</div>
+        <div style="margin-top:8px">
+          <button onclick="monitorSendNow()" class="btn" style="font-size:12px;padding:4px 10px;background:#FFE600;color:#111;border:none;border-radius:6px;cursor:pointer">
+            📤 Enviar agora
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- VENDAS HOJE -->
+    <div class="card" style="margin-bottom:20px">
+      <div style="font-weight:600;margin-bottom:12px">🛒 Vendas hoje por loja</div>
+      ${status.vendas.length === 0
+        ? `<p style="color:#888">Nenhuma venda registrada hoje ainda.</p>`
+        : `<table class="table">
+            <thead><tr><th>Loja</th><th style="text-align:center">Pedidos</th><th style="text-align:right">Faturamento</th></tr></thead>
+            <tbody>${status.vendas.map(v => `
+              <tr>
+                <td><b>${v.loja}</b></td>
+                <td style="text-align:center">${v.pedidos}</td>
+                <td style="text-align:right">${fmt.brl(v.faturamento)}</td>
+              </tr>`).join('')}
+              <tr style="font-weight:700;border-top:2px solid rgba(255,255,255,0.1)">
+                <td>TOTAL</td>
+                <td style="text-align:center">${status.vendas.reduce((a,v)=>a+v.pedidos,0)}</td>
+                <td style="text-align:right">${fmt.brl(status.vendas.reduce((a,v)=>a+(v.faturamento||0),0))}</td>
+              </tr>
+            </tbody>
+          </table>`}
+    </div>
+
+    <!-- ESTOQUE CRÍTICO -->
+    ${status.estoqueCritico.length > 0 ? `
+    <div class="card" style="margin-bottom:20px;border-left:4px solid #ef4444">
+      <div style="font-weight:600;margin-bottom:12px">⚠️ Estoque crítico (${status.estoqueCritico.length} produtos)</div>
+      <table class="table">
+        <thead><tr><th>Produto</th><th>Loja</th><th style="text-align:center">Estoque</th><th style="text-align:center">Dias</th></tr></thead>
+        <tbody>${status.estoqueCritico.map(p => `
+          <tr>
+            <td style="max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${p.item_title}">${p.item_title}</td>
+            <td>${p.loja}</td>
+            <td style="text-align:center">${p.estoque}</td>
+            <td style="text-align:center;color:${p.dias_restantes<=0?'#ef4444':p.dias_restantes<=3?'#f59e0b':'#888'}">
+              ${p.dias_restantes<=0?'ZERADO':p.dias_restantes+'d'}
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>` : ''}
+
+    <!-- CONFIGURAÇÃO -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px" id="monitorConfigGrid">
+
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:16px">🤖 Configuração do Telegram</div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;font-size:12px;color:#888;margin-bottom:4px">Bot Token</label>
+          <input id="tg_token" type="password" value="${cfg.telegram_token || ''}" placeholder="1234567890:AAxxxx..."
+            style="width:100%;padding:8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;font-size:12px;color:#888;margin-bottom:4px">Chat ID</label>
+          <input id="tg_chat" value="${cfg.telegram_chat_id || ''}" placeholder="-100123456789 ou @canal"
+            style="width:100%;padding:8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="display:block;font-size:12px;color:#888;margin-bottom:4px">Intervalo de envio (minutos)</label>
+          <input id="tg_interval" type="number" min="5" max="1440" value="${cfg.interval_min || 60}"
+            style="width:100%;padding:8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <div style="flex:1">
+            <label style="display:block;font-size:12px;color:#888;margin-bottom:4px">Silêncio: início (hora)</label>
+            <input id="tg_quiet_s" type="number" min="0" max="23" value="${cfg.quiet_start ?? 0}"
+              style="width:100%;padding:8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+          </div>
+          <div style="flex:1">
+            <label style="display:block;font-size:12px;color:#888;margin-bottom:4px">Silêncio: fim (hora)</label>
+            <input id="tg_quiet_e" type="number" min="0" max="23" value="${cfg.quiet_end ?? 7}"
+              style="width:100%;padding:8px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;box-sizing:border-box">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button onclick="monitorTestTelegram()" class="btn" style="flex:1;padding:8px;background:#1a1a1a;border:1px solid #FFE600;color:#FFE600;border-radius:6px;cursor:pointer;font-size:13px">
+            📩 Testar
+          </button>
+          <button onclick="monitorSave()" class="btn" style="flex:1;padding:8px;background:#FFE600;color:#111;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">
+            💾 Salvar
+          </button>
+        </div>
+        <div id="tgFeedback" style="margin-top:8px;font-size:12px;min-height:18px"></div>
+      </div>
+
+      <div class="card">
+        <div style="font-weight:600;margin-bottom:8px">⚙️ O que monitorar</div>
+        ${toggle('enabled',        'Alertas ativados',          'Liga/desliga todos os alertas')}
+        ${toggle('alert_vendas',   'Vendas por loja',           'Faturamento e pedidos do dia por loja')}
+        ${toggle('alert_estoque',  'Estoque crítico',           'Produtos com estoque para menos de N dias')}
+        ${toggle('alert_scheduler','Status do Scheduler',       'Pendentes, concluídos, retries e falhas')}
+        ${toggle('alert_pm2',      'Status do processo',        'Uptime, memória e versão Node.js')}
+        ${toggle('alert_erros',    'Alertas de erros críticos', 'Avisa quando há muitas falhas em 1 hora')}
+        <div style="margin-top:12px">
+          <label style="font-size:12px;color:#888">Estoque crítico: alertar com menos de quantos dias?</label>
+          <input id="tg_est_dias" type="number" min="1" max="30" value="${cfg.threshold_estoque_dias || 7}"
+            onchange="monitorSave()"
+            style="width:80px;padding:6px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;margin-top:4px">
+        </div>
+        <div style="margin-top:12px">
+          <label style="font-size:12px;color:#888">Alertar erros quando houver mais de quantos por hora?</label>
+          <input id="tg_err_thresh" type="number" min="1" max="50" value="${cfg.threshold_erros || 3}"
+            onchange="monitorSave()"
+            style="width:80px;padding:6px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;margin-top:4px">
+        </div>
+      </div>
+    </div>
+
+    <p style="color:#555;font-size:12px">Status atualizado em ${new Date(status.gerado_em).toLocaleString('pt-BR')} •
+      <a href="#" onclick="renderMonitor();return false" style="color:#FFE600;text-decoration:none">↻ Atualizar</a>
+    </p>`;
+}
+
+window.monitorSave = async function() {
+  // Atualiza toggles visualmente
+  document.querySelectorAll('[id^="tog_"]').forEach(el => {
+    const span = el.nextElementSibling;
+    if (span) {
+      span.style.background = el.checked ? '#FFE600' : '#444';
+      span.firstElementChild.style.left = el.checked ? '22px' : '2px';
+    }
+  });
+
+  const body = {
+    telegram_token:          document.getElementById('tg_token')?.value    || '',
+    telegram_chat_id:        document.getElementById('tg_chat')?.value     || '',
+    interval_min:            parseInt(document.getElementById('tg_interval')?.value || 60),
+    quiet_start:             parseInt(document.getElementById('tg_quiet_s')?.value  || 0),
+    quiet_end:               parseInt(document.getElementById('tg_quiet_e')?.value  || 7),
+    threshold_estoque_dias:  parseInt(document.getElementById('tg_est_dias')?.value || 7),
+    threshold_erros:         parseInt(document.getElementById('tg_err_thresh')?.value || 3),
+    enabled:          document.getElementById('tog_enabled')?.checked         || false,
+    alert_vendas:     document.getElementById('tog_alert_vendas')?.checked    || false,
+    alert_estoque:    document.getElementById('tog_alert_estoque')?.checked   || false,
+    alert_scheduler:  document.getElementById('tog_alert_scheduler')?.checked || false,
+    alert_pm2:        document.getElementById('tog_alert_pm2')?.checked       || false,
+    alert_erros:      document.getElementById('tog_alert_erros')?.checked     || false,
+  };
+  try {
+    await API.put('/api/monitor/config', body);
+    const fb = document.getElementById('tgFeedback');
+    if (fb) { fb.style.color='#22c55e'; fb.textContent='✓ Configuração salva'; setTimeout(()=>{fb.textContent='';},3000); }
+  } catch (e) {
+    const fb = document.getElementById('tgFeedback');
+    if (fb) { fb.style.color='#ef4444'; fb.textContent='Erro: ' + e.message; }
+  }
+};
+
+window.monitorTestTelegram = async function() {
+  const fb = document.getElementById('tgFeedback');
+  if (fb) { fb.style.color='#888'; fb.textContent='Enviando...'; }
+  try {
+    await API.post('/api/monitor/telegram-test', {
+      token:   document.getElementById('tg_token')?.value  || '',
+      chat_id: document.getElementById('tg_chat')?.value   || '',
+    });
+    if (fb) { fb.style.color='#22c55e'; fb.textContent='✓ Mensagem de teste enviada com sucesso!'; }
+  } catch (e) {
+    if (fb) { fb.style.color='#ef4444'; fb.textContent='Erro: ' + e.message; }
+  }
+};
+
+window.monitorSendNow = async function() {
+  try {
+    await API.post('/api/monitor/send-now', {});
+    toast('Alerta enviado com sucesso!', 'success');
+    renderMonitor();
+  } catch (e) {
+    toast('Erro: ' + e.message, 'error');
+  }
+};
 
 // ============================================================
 // COMPARATIVO DE PERÍODOS POR LOJA

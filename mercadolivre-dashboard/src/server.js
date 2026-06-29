@@ -274,6 +274,16 @@ for (const col of [
   try { db.exec(col); } catch {}
 }
 
+// Monitor config table
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS monitor_config (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+} catch {}
+
 // Order costs — manual COGS per order item
 try {
   db.exec(`
@@ -3645,6 +3655,266 @@ route('GET', '/api/curva-abc', (req, res, sess) => {
     apiErr(res, 500, e.message);
   }
 });
+
+// ============================================================
+// MONITORAMENTO & ALERTAS TELEGRAM
+// ============================================================
+
+// Helpers de config
+function monitorGet(key, def) {
+  const row = db.prepare('SELECT value FROM monitor_config WHERE key=?').get(key);
+  if (!row) return def;
+  try { return JSON.parse(row.value); } catch { return row.value; }
+}
+function monitorSet(key, value) {
+  db.prepare('INSERT OR REPLACE INTO monitor_config(key,value) VALUES(?,?)').run(key, JSON.stringify(value));
+}
+
+// Padrão de configuração de alertas
+const MONITOR_DEFAULTS = {
+  telegram_token:   '',
+  telegram_chat_id: '',
+  enabled:          false,
+  interval_min:     60,
+  alert_vendas:     true,
+  alert_estoque:    true,
+  alert_scheduler:  true,
+  alert_pm2:        true,
+  alert_erros:      true,
+  threshold_estoque_dias: 7,
+  threshold_erros:  3,
+  quiet_start:      0,   // hora início silêncio (0-23)
+  quiet_end:        7,   // hora fim silêncio
+};
+
+// Coleta snapshot de status do sistema
+function coletarStatus() {
+  const todayStr = (() => {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}-${String(n.getDate()).padStart(2,'0')}`;
+  })();
+
+  // Vendas de hoje por loja
+  const vendas = db.prepare(`
+    SELECT s.nickname as loja, o.store_id,
+      COUNT(DISTINCT o.id) as pedidos,
+      ROUND(SUM(oi.unit_price*oi.quantity),2) as faturamento
+    FROM orders o
+    JOIN order_items oi ON oi.order_id=o.id
+    JOIN stores s ON s.id=o.store_id
+    WHERE o.status='paid' AND DATE(o.date_created)=?
+    GROUP BY o.store_id
+  `).all(todayStr);
+
+  // Estoque crítico
+  const dias = monitorGet('threshold_estoque_dias', 7);
+  const vendasSemana = db.prepare(`
+    SELECT oi.item_id, oi.store_id, s.nickname as loja, oi.item_title,
+      SUM(oi.quantity)/7.0 as ritmo_diario
+    FROM order_items oi
+    JOIN orders o ON o.id=oi.order_id
+    JOIN stores s ON s.id=oi.store_id
+    WHERE o.status='paid' AND o.date_created >= date('now','-7 days')
+    GROUP BY oi.item_id, oi.store_id
+    HAVING ritmo_diario > 0
+  `).all();
+
+  const estoques = {};
+  db.prepare('SELECT id, store_id, available_quantity FROM listings').all()
+    .forEach(l => { estoques[`${l.id}_${l.store_id}`] = l.available_quantity || 0; });
+
+  const estoqueCritico = vendasSemana
+    .map(v => {
+      const estq = estoques[`${v.item_id}_${v.store_id}`] || 0;
+      const diasRestantes = v.ritmo_diario > 0 ? Math.floor(estq / v.ritmo_diario) : 999;
+      return { ...v, estoque: estq, dias_restantes: diasRestantes };
+    })
+    .filter(v => v.dias_restantes <= dias)
+    .sort((a, b) => a.dias_restantes - b.dias_restantes)
+    .slice(0, 10);
+
+  // Scheduler
+  const scheduler = {
+    pending:   db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='pending'").get().n,
+    running:   db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='running'").get().n,
+    completed: db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='completed' AND completed_at>=unixepoch('now','start of day')").get().n,
+    failed:    db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='failed' AND completed_at>=unixepoch('now','start of day')").get().n,
+    retries:   db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE attempts>1 AND created_at>=unixepoch('now','start of day')").get().n,
+  };
+
+  // Erros recentes (última hora)
+  const errosHora = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='failed' AND completed_at>=unixepoch()-3600").get().n;
+
+  return { vendas, estoqueCritico, scheduler, errosHora, gerado_em: new Date().toISOString() };
+}
+
+// Envia mensagem Telegram
+async function sendTelegram(token, chatId, text) {
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.description || 'Telegram error');
+  return json;
+}
+
+// Monta e envia alerta completo
+async function dispararAlertas(forceAll = false) {
+  const cfg = {};
+  Object.keys(MONITOR_DEFAULTS).forEach(k => { cfg[k] = monitorGet(k, MONITOR_DEFAULTS[k]); });
+
+  if (!cfg.enabled && !forceAll) return;
+  if (!cfg.telegram_token || !cfg.telegram_chat_id) return;
+
+  // Respeita horário de silêncio
+  if (!forceAll) {
+    const hora = new Date().getHours();
+    if (cfg.quiet_start < cfg.quiet_end) {
+      if (hora >= cfg.quiet_start && hora < cfg.quiet_end) return;
+    } else {
+      if (hora >= cfg.quiet_start || hora < cfg.quiet_end) return;
+    }
+  }
+
+  const s = coletarStatus();
+  const linhas = [];
+  const agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
+  linhas.push(`<b>📊 ML Dashboard — Relatório ${agora}</b>\n`);
+
+  // Vendas por loja
+  if (cfg.alert_vendas) {
+    if (s.vendas.length === 0) {
+      linhas.push('🛒 <b>Vendas hoje:</b> Nenhuma venda registrada ainda');
+    } else {
+      linhas.push('🛒 <b>Vendas hoje por loja:</b>');
+      s.vendas.forEach(v => {
+        linhas.push(`  • <b>${v.loja}</b>: ${v.pedidos} pedidos — R$ ${(v.faturamento||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}`);
+      });
+      const totalFat = s.vendas.reduce((a, v) => a + (v.faturamento||0), 0);
+      const totalPed = s.vendas.reduce((a, v) => a + v.pedidos, 0);
+      linhas.push(`  📦 Total: ${totalPed} pedidos — R$ ${totalFat.toLocaleString('pt-BR',{minimumFractionDigits:2})}`);
+    }
+    linhas.push('');
+  }
+
+  // Estoque crítico
+  if (cfg.alert_estoque && s.estoqueCritico.length > 0) {
+    linhas.push('⚠️ <b>Estoque crítico:</b>');
+    s.estoqueCritico.slice(0, 5).forEach(p => {
+      const icon = p.dias_restantes <= 0 ? '🔴' : p.dias_restantes <= 3 ? '🟠' : '🟡';
+      linhas.push(`  ${icon} ${p.item_title.slice(0,40)}... [${p.loja}]`);
+      linhas.push(`     Estoque: ${p.estoque} un • ${p.dias_restantes <= 0 ? 'ZERADO' : p.dias_restantes + ' dias restantes'}`);
+    });
+    linhas.push('');
+  }
+
+  // Scheduler
+  if (cfg.alert_scheduler) {
+    const q = s.scheduler;
+    linhas.push('⚙️ <b>Job Scheduler:</b>');
+    linhas.push(`  ⏳ Pendentes: ${q.pending} | ⚙️ Rodando: ${q.running}`);
+    linhas.push(`  ✅ Concluídos hoje: ${q.completed} | ❌ Falhas: ${q.failed} | 🔄 Retries: ${q.retries}`);
+    linhas.push('');
+  }
+
+  // Erros críticos
+  if (cfg.alert_erros && s.errosHora >= (cfg.threshold_erros || 3)) {
+    linhas.push(`🚨 <b>ATENÇÃO:</b> ${s.errosHora} erros na última hora!`);
+    linhas.push('');
+  }
+
+  // PM2 / processo
+  if (cfg.alert_pm2) {
+    const uptime = Math.floor(process.uptime());
+    const h = Math.floor(uptime / 3600);
+    const m = Math.floor((uptime % 3600) / 60);
+    const mem = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    linhas.push(`🖥️ <b>Processo:</b> Ativo há ${h}h${m}m | Memória: ${mem} MB`);
+  }
+
+  const texto = linhas.join('\n');
+  await sendTelegram(cfg.telegram_token, cfg.telegram_chat_id, texto);
+  monitorSet('last_alert_sent', new Date().toISOString());
+  console.log('[monitor] Alerta Telegram enviado');
+}
+
+// Agenda job de alertas a cada N minutos
+let monitorInterval = null;
+function startMonitorJob() {
+  if (monitorInterval) clearInterval(monitorInterval);
+  const minutos = monitorGet('interval_min', 60);
+  const ms = Math.max(minutos, 5) * 60_000;
+  monitorInterval = setInterval(() => {
+    dispararAlertas().catch(e => console.error('[monitor] Erro ao enviar alerta:', e.message));
+  }, ms);
+  console.log(`[monitor] Job agendado a cada ${minutos} min`);
+}
+
+// ── Endpoints de monitoramento ─────────────────────────────
+
+route('GET', '/api/monitor/config', (req, res, sess) => {
+  const cfg = {};
+  Object.keys(MONITOR_DEFAULTS).forEach(k => { cfg[k] = monitorGet(k, MONITOR_DEFAULTS[k]); });
+  cfg.last_alert_sent = monitorGet('last_alert_sent', null);
+  ok(res, cfg);
+});
+
+route('PUT', '/api/monitor/config', async (req, res, sess) => {
+  const body = await readBody(req);
+  Object.keys(MONITOR_DEFAULTS).forEach(k => {
+    if (body[k] !== undefined) monitorSet(k, body[k]);
+  });
+  // Reagenda se intervalo mudou
+  startMonitorJob();
+  ok(res, { ok: true });
+});
+
+route('GET', '/api/monitor/status', (req, res, sess) => {
+  try {
+    const s = coletarStatus();
+    const uptime = Math.floor(process.uptime());
+    s.processo = {
+      uptime_s: uptime,
+      uptime_fmt: `${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m`,
+      mem_mb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      node_version: process.version,
+      pid: process.pid,
+    };
+    s.last_alert_sent = monitorGet('last_alert_sent', null);
+    ok(res, s);
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/monitor/telegram-test', async (req, res, sess) => {
+  try {
+    const body = await readBody(req);
+    const token  = body.token  || monitorGet('telegram_token',   '');
+    const chatId = body.chat_id || monitorGet('telegram_chat_id', '');
+    if (!token || !chatId) { apiErr(res, 400, 'token e chat_id obrigatórios'); return; }
+    await sendTelegram(token, chatId, '✅ <b>ML Dashboard</b> — Teste de alerta funcionando!');
+    ok(res, { ok: true });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/monitor/send-now', async (req, res, sess) => {
+  try {
+    await dispararAlertas(true);
+    ok(res, { ok: true });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// Inicia job ao subir o servidor
+startMonitorJob();
 
 // ============================================================
 // TOKEN REFRESH JOB
