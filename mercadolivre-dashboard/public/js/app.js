@@ -69,6 +69,97 @@ function loading() {
   setContent(`<div class="loading-state"><div class="spinner"></div><p>Carregando...</p></div>`);
 }
 
+// ============================================================
+// WEBSOCKET — NOTIFICAÇÕES EM TEMPO REAL
+// ============================================================
+const _notifCounts = { questions: 0, messages: 0 };
+
+function setBadge(id, n) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = n;
+  el.style.display = n > 0 ? '' : 'none';
+}
+
+function notifToast(icon, title, body, onClick) {
+  const tc = document.getElementById('toastContainer');
+  if (!tc) return;
+  const el = document.createElement('div');
+  el.className = 'toast notif';
+  el.style.cssText = 'cursor:pointer;border-left:3px solid #FFE600;max-width:320px';
+  el.innerHTML = `<div style="font-weight:600">${icon} ${title}</div><div style="font-size:12px;color:#aaa;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${body}</div>`;
+  if (onClick) el.onclick = onClick;
+  tc.appendChild(el);
+  setTimeout(() => el.remove(), 8000);
+}
+
+function initWebSocket() {
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  let ws;
+
+  function connect() {
+    ws = new WebSocket(`${wsProto}://${location.host}`);
+
+    ws.onmessage = e => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+
+      if (msg.type === 'init_counts') {
+        if (msg.data.questions) {
+          _notifCounts.questions = msg.data.questions;
+          setBadge('questionsBadge', msg.data.questions);
+        }
+      }
+
+      if (msg.type === 'new_question') {
+        const d = msg.data;
+        _notifCounts.questions++;
+        setBadge('questionsBadge', _notifCounts.questions);
+        setBadge('reposicaoBadge', null); // não afeta
+
+        notifToast('❓', `Nova pergunta — ${d.store}`,
+          `${d.buyer}: ${d.text}`,
+          () => navigate('questions')
+        );
+
+        // Se estiver na página de perguntas, recarrega
+        if (location.hash === '#questions') renderQuestions?.();
+      }
+
+      if (msg.type === 'questions_count') {
+        const d = msg.data;
+        setBadge('questionsBadge', d.count);
+        _notifCounts.questions = d.count;
+      }
+
+      if (msg.type === 'new_message') {
+        const d = msg.data;
+        _notifCounts.messages++;
+        setBadge('messagesBadge', _notifCounts.messages);
+
+        notifToast('💬', `Nova mensagem — ${d.store}`,
+          `${d.buyer}: ${d.text}`,
+          () => navigate('messages')
+        );
+      }
+
+      if (msg.type === 'webhook') {
+        // silencioso — apenas log
+        console.log('[ws] webhook', msg.data.topic);
+      }
+    };
+
+    ws.onclose = () => {
+      // Reconecta após 5s
+      setTimeout(connect, 5000);
+    };
+
+    ws.onerror = () => ws.close();
+  }
+
+  connect();
+}
+
 function destroyCharts() {
   Object.values(State.charts).forEach(c => { try { c.destroy(); } catch {} });
   State.charts = {};
@@ -267,15 +358,8 @@ async function init() {
       navigate(page);
     });
 
-    // WebSocket for real-time updates
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${wsProto}://${location.host}`);
-    ws.onmessage = e => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'webhook') {
-        toast(`Atualização recebida: ${msg.data.topic}`, 'default');
-      }
-    };
+    // WebSocket — tempo real (mensagens, perguntas, webhooks)
+    initWebSocket();
 
     const page = location.hash.replace('#', '') || 'dashboard';
     navigate(page);

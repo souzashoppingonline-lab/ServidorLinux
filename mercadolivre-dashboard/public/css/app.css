@@ -835,6 +835,8 @@ tr:hover td { background: #fafafa; }
 .toast.success { background: #065f46; }
 .toast.error   { background: #991b1b; }
 .toast.warning { background: #92400e; }
+.toast.notif   { background: #1a1a2e; display:block; padding: 12px 16px; }
+.toast.notif:hover { background: #22223a; }
 
 @keyframes toastIn {
   from { opacity: 0; transform: translateX(20px); }
