@@ -2971,7 +2971,12 @@ async function vtLoad() {
       const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
       return `
         <tr>
-          <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px" title="${v.item_title}">${v.item_title}</td>
+          <td style="max-width:260px">
+            <div style="display:flex;align-items:center;gap:8px">
+              ${v.thumbnail ? `<img src="${v.thumbnail}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid var(--border)" onerror="this.style.display='none'">` : `<div style="width:36px;height:36px;background:var(--surface-2);border-radius:4px;flex-shrink:0;border:1px solid var(--border)"></div>`}
+              <span style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${v.item_title}">${v.item_title}</span>
+            </div>
+          </td>
           <td>
             <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
               ${v.store_icon||'🏪'} ${v.store_name}

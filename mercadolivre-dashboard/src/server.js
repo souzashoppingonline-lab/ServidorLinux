@@ -1703,6 +1703,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       s.store_color,
       s.store_icon,
       COALESCE(s.tax_rate, 0)  AS tax_rate,
+      COALESCE(l.thumbnail, '') AS thumbnail,
       COALESCE(oc.cost, 0) AS oc_cost,
       (oi.unit_price * oi.quantity) AS faturamento
     FROM order_items oi
@@ -1744,6 +1745,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       tax_rate:    r.tax_rate,
       unit_price:  r.unit_price,
       quantity:    r.quantity,
+      thumbnail:       r.thumbnail || '',
       faturamento:     fat,
       custo,
       imposto,
