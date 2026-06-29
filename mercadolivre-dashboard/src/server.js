@@ -639,10 +639,11 @@ const JOB_HANDLERS = {
     let from;
     if (!lastSync) {
       from = new Date(Date.now() - 30 * 86400000).toISOString(); // first run: 30 days back
-    } else if (maxDbDate && lastSyncDate && (lastSyncDate - maxDbDate) > 2 * 86400000) {
-      // Gap detected: last sync was >2 days after newest order → backfill from max DB date
-      from = new Date(maxDbDate.getTime() - 300000).toISOString();
-      console.log(`[sync] orders BACKFILL detected gap: max_db=${maxDbDate.toISOString().split('T')[0]} last_sync=${lastSyncDate.toISOString().split('T')[0]}`);
+    } else if (maxDbDate && lastSyncDate && (lastSyncDate - maxDbDate) > 2 * 86400000 && (Date.now()/1000 - lastSync) > 3600) {
+      // Gap detected only if last sync was >1h ago (avoids false trigger after manual DB pruning)
+      const gapDays = Math.min(30, Math.ceil((lastSyncDate - maxDbDate) / 86400000));
+      from = new Date(Date.now() - gapDays * 86400000).toISOString();
+      console.log(`[sync] orders BACKFILL gap detected — syncing last ${gapDays} days`);
     } else {
       from = new Date(lastSync * 1000 - 300000).toISOString(); // 5min overlap
     }
