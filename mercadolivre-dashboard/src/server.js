@@ -661,10 +661,6 @@ const JOB_HANDLERS = {
       const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
-      const updateLogisticType = db.prepare(`UPDATE orders SET shipping_logistic_type=? WHERE id=?`);
-
-      // Collect shipping IDs to fetch base_cost from ML
-      const shippingToFetch = [];
       db.transaction((orders) => {
         for (const o of orders) {
           const addr = o.shipping?.receiver_address || {};
@@ -684,21 +680,9 @@ const JOB_HANDLERS = {
           for (const item of (o.order_items||[])) {
             insertItem.run(orderId, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
           }
-          if (shippingId) shippingToFetch.push({ orderId, shippingId });
+          // logistic_type será buscado pelo job sync_shipment_types separadamente
         }
       })(page.results);
-
-      // Fetch seller shipping cost (base_cost) from /shipments/{id} — up to 5 at a time
-      for (let i = 0; i < shippingToFetch.length; i += 5) {
-        const batch = shippingToFetch.slice(i, i + 5);
-        await Promise.all(batch.map(async ({ orderId, shippingId }) => {
-          try {
-            const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
-            const logType = ship?.logistic_type || '';
-            if (logType) updateLogisticType.run(logType, orderId);
-          } catch { /* ignore individual failures */ }
-        }));
-      }
 
       total += page.results.length;
       if (page.results.length < 50) break;
