@@ -256,6 +256,9 @@ for (const col of [
   "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
   "ALTER TABLE stores ADD COLUMN tax_rate REAL DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN shipping_cost REAL DEFAULT 0",
+  "ALTER TABLE orders ADD COLUMN shipping_id TEXT DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN buyer_shipping_cost REAL DEFAULT 0",
+  "ALTER TABLE orders ADD COLUMN seller_shipping_cost REAL DEFAULT 0",
   "ALTER TABLE order_items ADD COLUMN sale_fee REAL DEFAULT 0",
   // Audit table index
   "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
@@ -654,28 +657,45 @@ const JOB_HANDLERS = {
       );
       if (!page?.results?.length) break;
 
-      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
+      const updateSellerShipping = db.prepare(`UPDATE orders SET seller_shipping_cost=? WHERE id=?`);
 
+      // Collect shipping IDs to fetch base_cost from ML
+      const shippingToFetch = [];
       db.transaction((orders) => {
         for (const o of orders) {
           const addr = o.shipping?.receiver_address || {};
-          const shippingCost = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
+          const buyerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
+          const shippingId = String(o.shipping?.id || '');
           insertOrder.run(
             o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
             String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'',
             addr.city?.name || addr.city || '',
             addr.state?.name || addr.state || '',
             addr.state?.id || addr.state_code || '',
-            shippingCost
+            buyerShipping, shippingId, buyerShipping, 0
           );
           deleteItems.run(o.id);
           for (const item of (o.order_items||[])) {
             insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
           }
+          if (shippingId) shippingToFetch.push({ orderId: o.id, shippingId });
         }
       })(page.results);
+
+      // Fetch seller shipping cost (base_cost) from /shipments/{id} — up to 5 at a time
+      for (let i = 0; i < shippingToFetch.length; i += 5) {
+        const batch = shippingToFetch.slice(i, i + 5);
+        await Promise.all(batch.map(async ({ orderId, shippingId }) => {
+          try {
+            const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
+            const baseCost = ship?.base_cost || ship?.cost?.gross || 0;
+            if (baseCost) updateSellerShipping.run(baseCost, orderId);
+          } catch { /* ignore individual failures */ }
+        }));
+      }
 
       total += page.results.length;
       if (page.results.length < 50) break;
@@ -1704,7 +1724,8 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       oi.order_id, oi.item_id, oi.item_title, oi.quantity, oi.unit_price,
       COALESCE(oi.sale_fee, 0) AS sale_fee,
       o.date_created, o.store_id, o.total_amount,
-      COALESCE(o.shipping_cost, 0) AS shipping_cost,
+      COALESCE(o.buyer_shipping_cost, o.shipping_cost, 0) AS buyer_shipping_cost,
+      COALESCE(o.seller_shipping_cost, 0) AS seller_shipping_cost,
       o.buyer_id, o.buyer_nickname,
       o.receiver_city, o.receiver_state, o.receiver_state_code,
       s.nickname  AS store_name,
@@ -1737,7 +1758,8 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       SUM(COALESCE(oc.cost, 0)) AS custo_total,
       SUM((oi.unit_price * oi.quantity) * COALESCE(s.tax_rate, 0) / 100) AS imposto_total,
       SUM(COALESCE(oi.sale_fee, 0)) AS tarifa_total,
-      SUM(COALESCE(o.shipping_cost, 0)) AS frete_v_total,
+      SUM(COALESCE(o.buyer_shipping_cost, o.shipping_cost, 0)) AS frete_c_total,
+      SUM(COALESCE(o.seller_shipping_cost, 0)) AS frete_v_total,
       COUNT(*) AS qty
     FROM order_items oi
     JOIN orders o  ON o.id = oi.order_id
@@ -1757,23 +1779,24 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
   const custo_t  = totRow.custo_total  || 0;
   const imp_t    = totRow.imposto_total|| 0;
   const tar_t    = totRow.tarifa_total || 0;
+  const fretec_t = totRow.frete_c_total|| 0;
   const fretev_t = totRow.frete_v_total|| 0;
-  const margem_t = fat_t - custo_t - imp_t - tar_t - fretev_t;
+  const margem_t = fat_t - custo_t - imp_t - tar_t - fretec_t - fretev_t;
   const mc_pct_t = fat_t > 0 ? (margem_t / fat_t) * 100 : 0;
 
   const totals = {
-    faturamento:      fat_t,
+    faturamento:       fat_t,
     vendas_canceladas: cancelRow.cancelled_total || 0,
-    custo:            custo_t,
-    imposto:          imp_t,
-    custo_imposto:    custo_t + imp_t,
-    tarifa:           tar_t,
-    frete_comprador:  0,
-    frete_vendedor:   fretev_t,
-    frete_total:      fretev_t,
-    margem:           margem_t,
-    mc_pct:           mc_pct_t,
-    count:            totRow.qty || 0,
+    custo:             custo_t,
+    imposto:           imp_t,
+    custo_imposto:     custo_t + imp_t,
+    tarifa:            tar_t,
+    frete_comprador:   fretec_t,
+    frete_vendedor:    fretev_t,
+    frete_total:       fretec_t + fretev_t,
+    margem:            margem_t,
+    mc_pct:            mc_pct_t,
+    count:             totRow.qty || 0,
   };
 
   const vendas = rows.map(r => {
@@ -1781,8 +1804,8 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     const custo    = r.oc_cost      || 0;
     const imposto  = fat * (r.tax_rate / 100);
     const tarifa   = r.sale_fee     || 0;
-    const frete_c  = 0; // frete comprador não está disponível na API
-    const frete_v  = r.shipping_cost || 0;
+    const frete_c  = r.buyer_shipping_cost  || 0;
+    const frete_v  = r.seller_shipping_cost || 0;
     const margem   = fat - custo - imposto - tarifa - frete_c - frete_v;
     const mc_pct   = fat > 0 ? (margem / fat) * 100 : 0;
     return {
@@ -1810,6 +1833,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       tarifa,
       frete_comprador: frete_c,
       frete_vendedor:  frete_v,
+      frete_total:     frete_c + frete_v,
       margem,
       mc_pct,
     };
