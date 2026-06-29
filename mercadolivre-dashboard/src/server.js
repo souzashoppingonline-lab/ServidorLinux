@@ -672,18 +672,19 @@ const JOB_HANDLERS = {
           const sellerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
           const shippingId = String(o.shipping?.id || '');
           insertOrder.run(
-            o.id, storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
+            String(o.id), storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
             String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'',
             addr.city?.name || addr.city || '',
             addr.state?.name || addr.state || '',
             addr.state?.id || addr.state_code || '',
             sellerShipping, shippingId, 0, sellerShipping
           );
-          deleteItems.run(o.id);
+          const orderId = String(o.id);
+          deleteItems.run(orderId);
           for (const item of (o.order_items||[])) {
-            insertItem.run(o.id, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
+            insertItem.run(orderId, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
           }
-          if (shippingId) shippingToFetch.push({ orderId: o.id, shippingId });
+          if (shippingId) shippingToFetch.push({ orderId, shippingId });
         }
       })(page.results);
 
