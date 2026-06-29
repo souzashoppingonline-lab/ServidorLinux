@@ -3723,7 +3723,9 @@ async function renderMonitor() {
         ${toggle('alert_estoque',  'Estoque crítico',           'Produtos com estoque para menos de N dias')}
         ${toggle('alert_scheduler','Status do Scheduler',       'Pendentes, concluídos, retries e falhas')}
         ${toggle('alert_pm2',      'Status do processo',        'Uptime, memória e versão Node.js')}
-        ${toggle('alert_erros',    'Alertas de erros críticos', 'Avisa quando há muitas falhas em 1 hora')}
+        ${toggle('alert_erros',      'Alertas de erros críticos', 'Avisa quando há muitas falhas em 1 hora')}
+        ${toggle('alert_perguntas',  'Novas perguntas (Telegram)', 'Alerta imediato ao receber nova pergunta de comprador')}
+        ${toggle('alert_mensagens',  'Novas mensagens (Telegram)', 'Alerta imediato ao receber mensagem pós-venda')}
         <div style="margin-top:12px">
           <label style="font-size:12px;color:#888">Estoque crítico: alertar com menos de quantos dias?</label>
           <input id="tg_est_dias" type="number" min="1" max="30" value="${cfg.threshold_estoque_dias || 7}"
@@ -3770,7 +3772,9 @@ window.monitorSave = async function() {
     alert_estoque:    document.getElementById('tog_alert_estoque')?.checked   || false,
     alert_scheduler:  document.getElementById('tog_alert_scheduler')?.checked || false,
     alert_pm2:        document.getElementById('tog_alert_pm2')?.checked       || false,
-    alert_erros:      document.getElementById('tog_alert_erros')?.checked     || false,
+    alert_erros:      document.getElementById('tog_alert_erros')?.checked      || false,
+    alert_perguntas:  document.getElementById('tog_alert_perguntas')?.checked  || false,
+    alert_mensagens:  document.getElementById('tog_alert_mensagens')?.checked  || false,
   };
   try {
     await API.put('/api/monitor/config', body);

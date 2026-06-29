@@ -3705,10 +3705,12 @@ const MONITOR_DEFAULTS = {
   alert_scheduler:  true,
   alert_pm2:        true,
   alert_erros:      true,
+  alert_perguntas:  true,
+  alert_mensagens:  true,
   threshold_estoque_dias: 7,
   threshold_erros:  3,
-  quiet_start:      0,   // hora início silêncio (0-23)
-  quiet_end:        7,   // hora fim silêncio
+  quiet_start:      0,
+  quiet_end:        7,
 };
 
 // Coleta snapshot de status do sistema
@@ -3981,7 +3983,7 @@ async function pollNewQuestions() {
           const tgEnabled = monitorGet('enabled', false);
           const tgToken   = monitorGet('telegram_token', '');
           const tgChat    = monitorGet('telegram_chat_id', '');
-          if (tgEnabled && tgToken && tgChat) {
+          if (tgEnabled && tgToken && tgChat && monitorGet('alert_perguntas', true)) {
             const msg = `❓ <b>Nova Pergunta — ${store.nickname}</b>\n\n` +
               `👤 ${payload.buyer}\n` +
               `📦 ${payload.item.slice(0, 60)}\n\n` +
@@ -4054,7 +4056,7 @@ async function pollNewMessages() {
               const tgEnabled = monitorGet('enabled', false);
               const tgToken   = monitorGet('telegram_token', '');
               const tgChat    = monitorGet('telegram_chat_id', '');
-              if (tgEnabled && tgToken && tgChat) {
+              if (tgEnabled && tgToken && tgChat && monitorGet('alert_mensagens', true)) {
                 const text = `💬 <b>Nova Mensagem — ${store.nickname}</b>\n\n` +
                   `👤 ${payload.buyer} (Pedido #${order.id})\n\n` +
                   `<i>${payload.text.slice(0, 300)}</i>`;
