@@ -52,7 +52,19 @@ db.exec(`
     permalink        TEXT DEFAULT '',
     thumbnail        TEXT DEFAULT '',
     created_at       INTEGER DEFAULT (unixepoch()),
-    last_sync        INTEGER DEFAULT 0
+    last_sync        INTEGER DEFAULT 0,
+    -- Multi-tenant enrichment fields (added via migration below)
+    country_id       TEXT DEFAULT 'BR',
+    currency_id      TEXT DEFAULT 'BRL',
+    status           TEXT DEFAULT 'active',
+    store_color      TEXT DEFAULT '#FFE600',
+    store_icon       TEXT DEFAULT '🏪',
+    account_type     TEXT DEFAULT 'seller',
+    last_error       TEXT DEFAULT '',
+    last_error_at    INTEGER DEFAULT 0,
+    sync_status      TEXT DEFAULT 'idle',
+    connected_at     INTEGER DEFAULT (unixepoch()),
+    permissions      TEXT DEFAULT '[]'
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -205,8 +217,24 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS scheduler_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT
+    store_id TEXT NOT NULL DEFAULT '',
+    key      TEXT NOT NULL,
+    value    TEXT,
+    PRIMARY KEY (store_id, key)
+  );
+
+  CREATE TABLE IF NOT EXISTS sync_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id    TEXT NOT NULL,
+    entity      TEXT NOT NULL,
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    duration_ms INTEGER,
+    records     INTEGER DEFAULT 0,
+    errors      INTEGER DEFAULT 0,
+    status      TEXT DEFAULT 'running',
+    message     TEXT DEFAULT '',
+    endpoints   TEXT DEFAULT '[]'
   );
 `);
 
@@ -214,6 +242,21 @@ db.exec(`
 for (const col of [
   "ALTER TABLE listings ADD COLUMN original_price REAL DEFAULT 0",
   "ALTER TABLE listings ADD COLUMN deal_ids TEXT DEFAULT ''",
+  // Multi-tenant stores enrichment
+  "ALTER TABLE stores ADD COLUMN country_id TEXT DEFAULT 'BR'",
+  "ALTER TABLE stores ADD COLUMN currency_id TEXT DEFAULT 'BRL'",
+  "ALTER TABLE stores ADD COLUMN status TEXT DEFAULT 'active'",
+  "ALTER TABLE stores ADD COLUMN store_color TEXT DEFAULT '#FFE600'",
+  "ALTER TABLE stores ADD COLUMN store_icon TEXT DEFAULT '🏪'",
+  "ALTER TABLE stores ADD COLUMN account_type TEXT DEFAULT 'seller'",
+  "ALTER TABLE stores ADD COLUMN last_error TEXT DEFAULT ''",
+  "ALTER TABLE stores ADD COLUMN last_error_at INTEGER DEFAULT 0",
+  "ALTER TABLE stores ADD COLUMN sync_status TEXT DEFAULT 'idle'",
+  "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT (unixepoch())",
+  "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
+  // Audit table index
+  "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
+  "CREATE INDEX IF NOT EXISTS idx_api_log_store ON api_log(store_id, logged_at DESC)",
 ]) {
   try { db.exec(col); } catch {}
 }
@@ -342,52 +385,88 @@ function cacheInvalidate(storeId) {
 }
 
 // ============================================================
-// RATE LIMITER
+// RATE LIMITER — per-store, independent buckets
 // ============================================================
+function makeRateLimiterBucket() {
+  return {
+    callsThisMinute: 0,
+    lastMinuteReset: Date.now(),
+    currentDelay: SCHEDULER_CONFIG.minDelay,
+    consecutive429: 0,
+  };
+}
+
+const _rlBuckets = new Map(); // storeId -> bucket
+
 const RateLimiter = {
-  callsThisMinute: 0,
-  lastMinuteReset: Date.now(),
-  currentDelay: SCHEDULER_CONFIG.minDelay,
-  consecutive429: 0,
+  // Get or create per-store bucket
+  _bucket(storeId) {
+    const key = storeId || '_global';
+    if (!_rlBuckets.has(key)) _rlBuckets.set(key, makeRateLimiterBucket());
+    return _rlBuckets.get(key);
+  },
 
-  async wait() {
+  async wait(storeId) {
+    const b = this._bucket(storeId);
     const now = Date.now();
-    if (now - this.lastMinuteReset >= 60000) {
-      this.callsThisMinute = 0;
-      this.lastMinuteReset = now;
+    if (now - b.lastMinuteReset >= 60000) {
+      b.callsThisMinute = 0;
+      b.lastMinuteReset = now;
     }
-    if (this.callsThisMinute >= SCHEDULER_CONFIG.maxCallsPerMinute) {
-      const wait = 60000 - (now - this.lastMinuteReset);
-      console.log(`[ratelimit] Limite/min atingido — aguardando ${Math.ceil(wait/1000)}s`);
+    if (b.callsThisMinute >= SCHEDULER_CONFIG.maxCallsPerMinute) {
+      const wait = 60000 - (now - b.lastMinuteReset);
+      console.log(`[ratelimit:${storeId}] Limite/min atingido — aguardando ${Math.ceil(wait/1000)}s`);
       await new Promise(r => setTimeout(r, wait + 100));
-      this.callsThisMinute = 0;
-      this.lastMinuteReset = Date.now();
+      b.callsThisMinute = 0;
+      b.lastMinuteReset = Date.now();
     }
-    if (this.currentDelay > SCHEDULER_CONFIG.minDelay) {
-      await new Promise(r => setTimeout(r, this.currentDelay));
+    if (b.currentDelay > SCHEDULER_CONFIG.minDelay) {
+      await new Promise(r => setTimeout(r, b.currentDelay));
     }
-    this.callsThisMinute++;
+    b.callsThisMinute++;
   },
 
-  on429(retryAfterSec = 30) {
-    this.consecutive429++;
-    // Back off aggressively: use the retry-after header value, minimum 30s
+  on429(storeId, retryAfterSec = 30) {
+    const b = this._bucket(storeId);
+    b.consecutive429++;
     const backoffMs = Math.max(retryAfterSec * 1000, 30000);
-    this.currentDelay = Math.min(Math.max(this.currentDelay * 2, backoffMs), 120000);
-    console.log(`[ratelimit] 429 detectado (#${this.consecutive429}) — delay aumentado para ${this.currentDelay}ms`);
+    b.currentDelay = Math.min(Math.max(b.currentDelay * 2, backoffMs), 120000);
+    console.log(`[ratelimit:${storeId}] 429 detectado (#${b.consecutive429}) — delay aumentado para ${b.currentDelay}ms`);
   },
 
-  onSuccess() {
-    if (this.consecutive429 > 0) {
-      this.consecutive429 = 0;
-      this.currentDelay = Math.max(this.currentDelay * 0.85, SCHEDULER_CONFIG.minDelay);
+  onSuccess(storeId) {
+    const b = this._bucket(storeId);
+    if (b.consecutive429 > 0) {
+      b.consecutive429 = 0;
+      b.currentDelay = Math.max(b.currentDelay * 0.85, SCHEDULER_CONFIG.minDelay);
     }
   },
 
-  // Hard pause: stop all calls for N seconds (used after consecutive 429s)
-  async pause(ms) {
-    console.log(`[ratelimit] Pausa forçada de ${ms/1000}s para recuperar rate limit`);
+  async pause(storeId, ms) {
+    console.log(`[ratelimit:${storeId}] Pausa forçada de ${ms/1000}s para recuperar rate limit`);
     await new Promise(r => setTimeout(r, ms));
+  },
+
+  // Stats for all stores (used in /api/scheduler/status)
+  get consecutive429() {
+    let max = 0;
+    for (const b of _rlBuckets.values()) max = Math.max(max, b.consecutive429);
+    return max;
+  },
+  get currentDelay() {
+    let max = SCHEDULER_CONFIG.minDelay;
+    for (const b of _rlBuckets.values()) max = Math.max(max, b.currentDelay);
+    return max;
+  },
+  get callsThisMinute() {
+    let total = 0;
+    for (const b of _rlBuckets.values()) total += b.callsThisMinute;
+    return total;
+  },
+  allStats() {
+    const out = {};
+    for (const [k, b] of _rlBuckets.entries()) out[k] = { ...b };
+    return out;
   },
 };
 
@@ -402,7 +481,7 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
     token = await ensureFreshToken(store);
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    await RateLimiter.wait();
+    await RateLimiter.wait(storeId);
     const t0 = Date.now();
     const res = await fetch(`${ML_API}${apiPath}`, {
       method: opts.method || 'GET',
@@ -421,8 +500,8 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
 
     if (res.status === 429) {
       const retrySec = parseInt(res.headers.get('retry-after') || res.headers.get('x-ratelimit-reset') || '30', 10);
-      RateLimiter.on429(retrySec);
-      console.log(`[api] 429 em ${apiPath} — aguardando ${retrySec}s...`);
+      RateLimiter.on429(storeId, retrySec);
+      console.log(`[api:${storeId}] 429 em ${apiPath} — aguardando ${retrySec}s...`);
       await new Promise(r => setTimeout(r, Math.min(retrySec, 60) * 1000));
       continue;
     }
@@ -431,7 +510,7 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
       db.prepare('UPDATE api_log SET error=? WHERE id=(SELECT MAX(id) FROM api_log)').run(text.slice(0, 200));
       throw new Error(`ML API ${res.status}: ${text.slice(0, 200)}`);
     }
-    RateLimiter.onSuccess();
+    RateLimiter.onSuccess(storeId);
     return res.json();
   }
   throw new Error('ML API 429: rate limit após retries');
@@ -1102,36 +1181,51 @@ const Scheduler = {
   async processJob(job) {
     db.prepare('UPDATE job_queue SET status=?, started_at=unixepoch(), attempts=attempts+1 WHERE id=?')
       .run('running', job.id);
+    db.prepare("UPDATE stores SET sync_status='syncing' WHERE id=?").run(job.store_id);
     this.currentJob = job;
     const t0 = Date.now();
+    const auditId = db.prepare(
+      'INSERT INTO sync_audit(store_id,entity,started_at) VALUES(?,?,unixepoch())'
+    ).run(job.store_id, job.type).lastInsertRowid;
 
     try {
-      // If we've been getting 429s, pause before starting next job
-      if (RateLimiter.consecutive429 >= 3) {
-        await RateLimiter.pause(60000); // 1 minute hard pause
+      // If this store has been getting 429s, pause before starting
+      const rl = RateLimiter._bucket(job.store_id);
+      if (rl.consecutive429 >= 3) {
+        await RateLimiter.pause(job.store_id, 60000);
       }
 
       const payload = JSON.parse(job.payload || '{}');
       await JOB_HANDLERS[job.type]?.(job.store_id, payload);
+      const dur = Date.now() - t0;
       db.prepare('UPDATE job_queue SET status=?, completed_at=unixepoch(), duration_ms=? WHERE id=?')
-        .run('completed', Date.now() - t0, job.id);
-      console.log(`[scheduler] ✓ ${job.type} store=${job.store_id} (${Date.now()-t0}ms)`);
+        .run('completed', dur, job.id);
+      db.prepare("UPDATE stores SET sync_status='idle', last_sync=unixepoch() WHERE id=?").run(job.store_id);
+      db.prepare('UPDATE sync_audit SET status=?,finished_at=unixepoch(),duration_ms=? WHERE id=?')
+        .run('ok', dur, auditId);
+      console.log(`[scheduler] ✓ ${job.type} store=${job.store_id} (${dur}ms)`);
     } catch (e) {
       const attempts = job.attempts + 1;
       const is429 = e.message.includes('429') || e.message.includes('rate limit');
       const retryDelays = is429
-        ? [600000, 1800000, 3600000]   // 429: 10min, 30min, 1h
-        : [300000, 900000, 1800000];   // other: 5min, 15min, 30min
+        ? [600000, 1800000, 3600000]
+        : [300000, 900000, 1800000];
+      const dur = Date.now() - t0;
       if (attempts < job.max_attempts) {
         const delay = retryDelays[attempts - 1] || 3600000;
         db.prepare('UPDATE job_queue SET status=?, error=?, scheduled_at=unixepoch()+? WHERE id=?')
           .run('pending', e.message.slice(0, 500), Math.floor(delay/1000), job.id);
+        db.prepare("UPDATE stores SET sync_status='idle' WHERE id=?").run(job.store_id);
         console.log(`[scheduler] ✗ ${job.type} tentativa ${attempts}/${job.max_attempts} — retry em ${delay/60000}min`);
       } else {
         db.prepare('UPDATE job_queue SET status=?, completed_at=unixepoch(), duration_ms=?, error=? WHERE id=?')
-          .run('failed', Date.now() - t0, e.message.slice(0, 500), job.id);
+          .run('failed', dur, e.message.slice(0, 500), job.id);
+        db.prepare("UPDATE stores SET sync_status='error', last_error=?, last_error_at=unixepoch() WHERE id=?")
+          .run(e.message.slice(0, 300), job.store_id);
         console.error(`[scheduler] FALHA PERMANENTE ${job.type} store=${job.store_id}:`, e.message);
       }
+      db.prepare('UPDATE sync_audit SET status=?,finished_at=unixepoch(),duration_ms=?,message=? WHERE id=?')
+        .run('error', dur, e.message.slice(0, 300), auditId);
     }
     this.currentJob = null;
   },
@@ -1430,16 +1524,19 @@ route('GET', '/ml/callback', async (req, res) => {
       : (user.thumbnail?.picture_url || user.thumbnail?.secure_url || '');
 
     db.prepare(`
-      INSERT INTO stores(id,nickname,email,access_token,refresh_token,token_expires_at,site_id,permalink,thumbnail)
-      VALUES(?,?,?,?,?,?,?,?,?)
+      INSERT INTO stores(id,nickname,email,access_token,refresh_token,token_expires_at,site_id,permalink,thumbnail,
+                         country_id,currency_id,status,connected_at,sync_status)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,'active',unixepoch(),'idle')
       ON CONFLICT(id) DO UPDATE SET
         nickname=excluded.nickname, email=excluded.email,
         access_token=excluded.access_token, refresh_token=excluded.refresh_token,
-        token_expires_at=excluded.token_expires_at, permalink=excluded.permalink, thumbnail=excluded.thumbnail
+        token_expires_at=excluded.token_expires_at, permalink=excluded.permalink, thumbnail=excluded.thumbnail,
+        status='active', sync_status='idle', last_error='', last_error_at=0
     `).run(
       String(user.id), user.nickname || '', user.email || '',
       tokens.access_token, tokens.refresh_token || '', exp,
       user.site_id || 'MLB', user.permalink || '', thumbUrl,
+      user.country_id || 'BR', user.currency_id || 'BRL',
     );
 
     const sess = createSession(String(user.id));
@@ -1504,7 +1601,17 @@ route('GET', '/api/debug-session', (req, res) => {
 
 // ── Stores ─────────────────────────────────────────────────
 route('GET', '/api/stores', (req, res, sess) => {
-  const stores = db.prepare('SELECT id,nickname,email,site_id,permalink,thumbnail,created_at,last_sync FROM stores').all();
+  const stores = db.prepare(`
+    SELECT s.id, s.nickname, s.email, s.site_id, s.permalink, s.thumbnail,
+           s.created_at, s.last_sync, s.status, s.store_color, s.store_icon,
+           s.account_type, s.sync_status, s.last_error, s.last_error_at,
+           s.country_id, s.currency_id, s.connected_at,
+           (SELECT sl.status FROM sync_log sl WHERE sl.store_id=s.id ORDER BY sl.last_sync DESC LIMIT 1) as last_sync_status,
+           (SELECT COUNT(*) FROM orders WHERE store_id=s.id AND status='paid') as total_orders,
+           (SELECT COUNT(*) FROM listings WHERE store_id=s.id AND status='active') as active_listings
+    FROM stores s
+    ORDER BY s.nickname
+  `).all();
   ok(res, { stores });
 });
 
@@ -1519,9 +1626,40 @@ route('DELETE', '/api/stores', (req, res, sess) => {
 
 // ── Me ─────────────────────────────────────────────────────
 route('GET', '/api/me', (req, res, sess) => {
-  const store  = db.prepare('SELECT id,nickname,email,site_id,permalink,thumbnail FROM stores WHERE id=?').get(sess.store_id);
-  const stores = db.prepare('SELECT id,nickname,thumbnail FROM stores').all();
+  const store  = db.prepare('SELECT id,nickname,email,site_id,permalink,thumbnail,store_color,store_icon,account_type,sync_status,status FROM stores WHERE id=?').get(sess.store_id);
+  const stores = db.prepare('SELECT id,nickname,thumbnail,store_color,store_icon,status,sync_status FROM stores ORDER BY nickname').all();
   ok(res, { store, stores });
+});
+
+// ── Store sync status ────────────────────────────────────────
+route('GET', '/api/stores/sync-status', (req, res, sess) => {
+  const rows = db.prepare(`
+    SELECT s.id, s.nickname, s.sync_status, s.last_sync, s.last_error,
+           sl.entity, sl.last_sync as entity_sync, sl.status as entity_status
+    FROM stores s
+    LEFT JOIN sync_log sl ON sl.store_id = s.id
+    ORDER BY s.nickname, sl.entity
+  `).all();
+  // Group by store
+  const byStore = {};
+  rows.forEach(r => {
+    if (!byStore[r.id]) byStore[r.id] = { id: r.id, nickname: r.nickname, sync_status: r.sync_status, last_sync: r.last_sync, last_error: r.last_error, entities: [] };
+    if (r.entity) byStore[r.id].entities.push({ entity: r.entity, last_sync: r.entity_sync, status: r.entity_status });
+  });
+  ok(res, { stores: Object.values(byStore) });
+});
+
+// ── Update store settings ────────────────────────────────────
+route('PUT', '/api/stores', (req, res, sess) => {
+  const body = parseBody(req);
+  const id   = qp(req).get('id') || sess.store_id;
+  const allowed = ['store_color', 'store_icon', 'nickname'];
+  const updates = {};
+  allowed.forEach(f => { if (body[f] !== undefined) updates[f] = body[f]; });
+  if (!Object.keys(updates).length) { apiErr(res, 400, 'Nenhum campo válido para atualizar'); return; }
+  const sets = Object.keys(updates).map(k => `${k}=?`).join(',');
+  db.prepare(`UPDATE stores SET ${sets} WHERE id=?`).run(...Object.values(updates), id);
+  ok(res, { ok: true });
 });
 
 // ── Dashboard ──────────────────────────────────────────────
@@ -1790,7 +1928,12 @@ route('GET', '/api/scheduler/status', (req, res, sess) => {
   ok(res, {
     queue: { pending, running, completedToday, failedToday, retriesToday },
     currentJob: Scheduler.currentJob,
-    rateLimiter: { currentDelay: RateLimiter.currentDelay, callsThisMinute: RateLimiter.callsThisMinute, consecutive429: RateLimiter.consecutive429 },
+    rateLimiter: {
+      currentDelay: RateLimiter.currentDelay,
+      callsThisMinute: RateLimiter.callsThisMinute,
+      consecutive429: RateLimiter.consecutive429,
+      perStore: RateLimiter.allStats(),
+    },
     avgDuration: Math.round(avgDuration),
     recentJobs,
     pendingJobs,
@@ -1841,7 +1984,8 @@ route('POST', '/api/promotions/sync', (req, res, sess) => {
 });
 
 route('GET', '/api/debug/orders', (req, res) => {
-  const storeId = qp(req).get('storeId') || '1662123376';
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
   const total        = db.prepare("SELECT COUNT(*) as n FROM orders WHERE store_id=?").get(storeId);
   const byStatus     = db.prepare("SELECT status, COUNT(*) as n FROM orders WHERE store_id=? GROUP BY status ORDER BY n DESC").all(storeId);
   const dateRange    = db.prepare("SELECT MIN(date_created) as min_d, MAX(date_created) as max_d FROM orders WHERE store_id=?").get(storeId);
@@ -1874,7 +2018,8 @@ route('GET', '/api/debug/visits', (req, res) => {
 }, true);
 
 route('GET', '/api/debug/ads-live', async (req, res) => {
-  const storeId = qp(req).get('storeId') || '1662123376';
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
   try {
     const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms));
     const safeGet = (path) => Promise.race([mlFetch(path, {}, storeId), timeout(8000)]).catch(e => ({ _error: e.message }));
@@ -1891,7 +2036,8 @@ route('GET', '/api/debug/ads-live', async (req, res) => {
 }, true);
 
 route('GET', '/api/debug/ads', (req, res) => {
-  const storeId = qp(req).get('storeId') || '1662123376';
+  const storeId = qp(req).get('storeId');
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
   try {
     const camps     = db.prepare('SELECT COUNT(*) as n FROM ads_campaigns WHERE store_id=?').get(storeId);
     const campList  = db.prepare('SELECT id,name,status FROM ads_campaigns WHERE store_id=? LIMIT 5').all(storeId);
@@ -2678,7 +2824,8 @@ route('GET', '/api/ads/campaigns', (req, res, sess) => {
 });
 
 route('POST', '/api/visits/sync', (req, res, sess) => {
-  const storeId = qp(req).get('storeId') || (sess && sess.store_id) || '1662123376';
+  const storeId = qp(req).get('storeId') || (sess && sess.store_id);
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
   const force   = qp(req).get('force') === '1';
   if (force) {
     // Full reset: wipe all visit data so sync restarts from scratch
@@ -2692,7 +2839,8 @@ route('POST', '/api/visits/sync', (req, res, sess) => {
 
 // Force orders backfill — wipes sync_log so next run fetches from MAX(date_created)
 route('POST', '/api/orders/sync', (req, res, sess) => {
-  const storeId = qp(req).get('storeId') || (sess && sess.store_id) || '1662123376';
+  const storeId = qp(req).get('storeId') || (sess && sess.store_id);
+  if (!storeId) { apiErr(res, 400, 'storeId obrigatório'); return; }
   db.prepare("DELETE FROM sync_log WHERE store_id=? AND entity='orders'").run(storeId);
   Scheduler.enqueue('sync_orders', storeId, 2);
   ok(res, { ok: true, message: 'Backfill de pedidos enfileirado — buscará desde último pedido no banco até hoje' });

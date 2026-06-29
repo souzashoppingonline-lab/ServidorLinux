@@ -1149,51 +1149,91 @@ async function renderStores() {
     State.stores = stores;
     buildStoreSelector();
 
+    function syncStatusBadge(s) {
+      if (s.sync_status === 'syncing') return `<span style="background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">⟳ Sincronizando</span>`;
+      if (s.sync_status === 'error')   return `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">✕ Erro</span>`;
+      if (s.status === 'inactive')     return `<span style="background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">Inativo</span>`;
+      return `<span style="background:#d1fae5;color:#065f46;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">✔ Ativo</span>`;
+    }
+
     setContent(`
       <div class="page-header">
         <div>
           <div class="page-title">Lojas Conectadas</div>
-          <div class="page-subtitle">Gerencie as contas do Mercado Livre integradas</div>
+          <div class="page-subtitle">${stores.length} conta${stores.length !== 1 ? 's' : ''} do Mercado Livre integrada${stores.length !== 1 ? 's' : ''}</div>
         </div>
+        <a href="/ml/connect" class="btn btn-primary">+ Adicionar Loja</a>
       </div>
-      <div class="store-cards">
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;margin-bottom:24px">
         ${stores.map(s => `
-          <div class="store-card">
-            <div class="store-card-avatar">
-              ${s.thumbnail ? `<img src="${s.thumbnail}" alt="${s.nickname}">` : s.nickname[0].toUpperCase()}
+          <div class="card" style="border-left:4px solid ${s.store_color||'#FFE600'}">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+              <div style="width:48px;height:48px;border-radius:50%;background:${s.store_color||'#FFE600'};display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;overflow:hidden">
+                ${s.thumbnail ? `<img src="${s.thumbnail}" style="width:100%;height:100%;object-fit:cover;border-radius:50%">` : (s.store_icon||'🏪')}
+              </div>
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${s.nickname}</div>
+                <div style="font-size:11px;color:var(--text-3);font-family:monospace">ID: ${s.id} · ${s.site_id||'MLB'}</div>
+              </div>
+              ${syncStatusBadge(s)}
             </div>
-            <div class="store-card-info">
-              <div class="store-card-name">${s.nickname}</div>
-              <div class="store-card-id">ID: ${s.id}</div>
-              ${s.email ? `<div class="store-card-id">${s.email}</div>` : ''}
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+              <div style="text-align:center;background:var(--bg);padding:8px;border-radius:var(--radius-sm)">
+                <div style="font-size:18px;font-weight:800;color:var(--text)">${s.active_listings||0}</div>
+                <div style="font-size:10px;color:var(--text-3)">Anúncios</div>
+              </div>
+              <div style="text-align:center;background:var(--bg);padding:8px;border-radius:var(--radius-sm)">
+                <div style="font-size:18px;font-weight:800;color:var(--text)">${s.total_orders||0}</div>
+                <div style="font-size:10px;color:var(--text-3)">Pedidos</div>
+              </div>
+              <div style="text-align:center;background:var(--bg);padding:8px;border-radius:var(--radius-sm)">
+                <div style="font-size:18px;font-weight:800;color:var(--text)">${s.currency_id||'BRL'}</div>
+                <div style="font-size:10px;color:var(--text-3)">Moeda</div>
+              </div>
             </div>
-            ${stores.length > 1 ? `<button class="btn btn-danger btn-sm btn-icon" title="Desconectar" onclick="disconnectStore('${s.id}','${s.nickname}')">🗑</button>` : ''}
+
+            ${s.last_error ? `<div style="font-size:11px;color:#dc2626;background:#fee2e2;padding:6px 8px;border-radius:4px;margin-bottom:8px;word-break:break-word">${s.last_error.slice(0,120)}</div>` : ''}
+
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-3)">
+              <span>Conectada: ${s.connected_at ? new Date(s.connected_at*1000).toLocaleDateString('pt-BR') : '—'}</span>
+              <span>Sync: ${s.last_sync ? new Date(s.last_sync*1000).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'Nunca'}</span>
+            </div>
+
+            <div style="display:flex;gap:6px;margin-top:10px">
+              <button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>
+              <button class="btn btn-sm btn-outline" onclick="window.editStore('${s.id}','${s.nickname}','${s.store_color||'#FFE600'}','${s.store_icon||'🏪'}')" title="Personalizar">✏</button>
+              ${stores.length > 1 ? `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" title="Desconectar" onclick="disconnectStore('${s.id}','${s.nickname}')">🗑</button>` : ''}
+            </div>
           </div>
         `).join('')}
-        <a href="/ml/connect" class="add-store-card">
-          <span style="font-size:24px">+</span>
-          <span>Adicionar nova loja</span>
+
+        <a href="/ml/connect" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;border:2px dashed var(--border);border-radius:var(--radius);padding:32px;text-decoration:none;color:var(--text-3);transition:all .2s;min-height:200px" onmouseover="this.style.borderColor='var(--primary)';this.style.color='var(--primary)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text-3)'">
+          <span style="font-size:32px">+</span>
+          <span style="font-weight:600">Adicionar nova loja</span>
+          <span style="font-size:12px;text-align:center">Conecte outra conta do Mercado Livre via OAuth</span>
         </a>
       </div>
 
-      <div class="card mt-24">
-        <div class="card-title">⚙️ Configurações do App</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:4px">
+      <div class="card">
+        <div class="card-title">⚙️ Configurações da Integração</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:8px">
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:4px">App ID</div>
-            <div style="font-family:monospace;font-size:14px;background:var(--bg);padding:8px 12px;border-radius:var(--radius-sm)">886699420287362</div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:4px">App ID</div>
+            <div style="font-family:monospace;font-size:13px;background:var(--bg);padding:8px 10px;border-radius:var(--radius-sm)">886699420287362</div>
           </div>
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:4px">Redirect URI</div>
-            <div style="font-family:monospace;font-size:13px;background:var(--bg);padding:8px 12px;border-radius:var(--radius-sm);word-break:break-all">https://multimixvendas.duckdns.org/ml/callback</div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:4px">Redirect URI</div>
+            <div style="font-family:monospace;font-size:11px;background:var(--bg);padding:8px 10px;border-radius:var(--radius-sm);word-break:break-all">https://multimixvendas.duckdns.org/ml/callback</div>
           </div>
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:4px">Webhook URL</div>
-            <div style="font-family:monospace;font-size:13px;background:var(--bg);padding:8px 12px;border-radius:var(--radius-sm);word-break:break-all">https://multimixvendas.duckdns.org/ml/webhook</div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:4px">Webhook URL</div>
+            <div style="font-family:monospace;font-size:11px;background:var(--bg);padding:8px 10px;border-radius:var(--radius-sm);word-break:break-all">https://multimixvendas.duckdns.org/ml/webhook</div>
           </div>
           <div>
-            <div style="font-size:13px;font-weight:600;color:var(--text-2);margin-bottom:4px">Lojas ativas</div>
-            <div style="font-size:22px;font-weight:800;color:var(--text)">${stores.length}</div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:4px">Lojas ativas</div>
+            <div style="font-size:28px;font-weight:800">${stores.filter(s=>s.status!=='inactive').length} <span style="font-size:13px;font-weight:400;color:var(--text-3)">de ${stores.length}</span></div>
           </div>
         </div>
       </div>
@@ -1202,6 +1242,52 @@ async function renderStores() {
     setContent(`<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`);
   }
 }
+
+window.switchStore = (id) => {
+  State.currentStore = id;
+  document.getElementById('storeSelect').value = id;
+  navigate('dashboard');
+  toast('Loja selecionada', 'success');
+};
+
+window.editStore = (id, nickname, color, icon) => {
+  Modal.open('Personalizar Loja', `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Nome de exibição</label>
+        <input id="editStoreName" type="text" class="input" value="${nickname}" style="width:100%">
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Cor da loja</label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="editStoreColor" type="color" value="${color}" style="width:48px;height:36px;border:none;cursor:pointer;border-radius:4px">
+          <span style="font-size:12px;color:var(--text-3)">Usada na barra lateral e nos cards</span>
+        </div>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Ícone (emoji)</label>
+        <input id="editStoreIcon" type="text" class="input" value="${icon}" style="width:80px;font-size:20px;text-align:center">
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="Modal.close()">Cancelar</button>
+    <button class="btn btn-primary" onclick="window.saveStoreEdit('${id}')">Salvar</button>
+  `);
+};
+
+window.saveStoreEdit = async (id) => {
+  const nickname    = document.getElementById('editStoreName')?.value?.trim();
+  const store_color = document.getElementById('editStoreColor')?.value;
+  const store_icon  = document.getElementById('editStoreIcon')?.value?.trim();
+  try {
+    await API.put(`/api/stores?id=${id}`, { nickname, store_color, store_icon });
+    toast('Loja atualizada!', 'success');
+    Modal.close();
+    renderStores();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
 
 window.disconnectStore = (id, name) => {
   Modal.open('Desconectar Loja', `
