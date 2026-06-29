@@ -2978,7 +2978,7 @@ async function vtLoad() {
             </span>
           </td>
           <td style="font-family:monospace;font-size:11px;color:var(--text-2)">${v.sku||'-'}</td>
-          <td style="font-size:12px;white-space:nowrap">${fmt.dt(v.date)}</td>
+          <td style="font-size:12px;white-space:nowrap">${fmt.date(v.date)}</td>
           <td style="text-align:right;font-size:12px;color:var(--text-3)">-</td>
           <td style="text-align:right;font-size:12px">${M(v.unit_price)}</td>
           <td style="text-align:center;font-size:12px">${v.quantity}</td>
