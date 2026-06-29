@@ -1063,7 +1063,7 @@ async function loadMessagesInbox() {
   }
 }
 
-window.openConversation = async (packId, storeId, buyer, orderId) => {
+window.openConversation = async (packId, storeId, buyer, orderId, live = false) => {
   // Destaca item ativo
   document.querySelectorAll('#convList > div').forEach(el => el.style.background = 'transparent');
   const active = document.getElementById(`conv-item-${packId}`);
@@ -1072,40 +1072,71 @@ window.openConversation = async (packId, storeId, buyer, orderId) => {
   const thread = document.getElementById('convThread');
   if (!thread) return;
   thread.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+
+  // Guarda contexto para poder recarregar
+  thread.dataset.packId  = packId;
+  thread.dataset.storeId = storeId;
+  thread.dataset.buyer   = buyer;
+  thread.dataset.orderId = orderId;
+
   try {
-    const data = await API.messages(storeId, packId);
-    const msgs  = data.messages || [];
+    const url  = `/api/messages?storeId=${storeId}&packId=${packId}${live ? '&live=1' : ''}`;
+    const data = await API.get(url);
+    const msgs = data.messages || [];
+    const fromCache = data.source === 'cache';
+
+    // Para mensagens do cache, isMine = nickname começa com store nickname
+    // Para live, user_id disponível
+    const storeName = State.stores?.find(s => s.id == storeId)?.nickname || '';
+
+    const renderMsg = m => {
+      const isMine = m.from?.user_id
+        ? String(m.from.user_id) === String(storeId)
+        : (storeName && m.from?.nickname?.toUpperCase().startsWith(storeName.split('_')[0]?.toUpperCase()));
+      return `<div style="display:flex;justify-content:${isMine?'flex-end':'flex-start'}">
+        <div style="max-width:75%;padding:10px 14px;border-radius:${isMine?'12px 12px 4px 12px':'12px 12px 12px 4px'};background:${isMine?'rgba(255,230,0,.15)':'rgba(255,255,255,.08)'};font-size:13px">
+          <div style="font-size:10px;color:var(--text-2);margin-bottom:4px">${isMine?'Você':m.from?.nickname||buyer||'Comprador'} · ${fmt.dt(m.created_at)}</div>
+          <div>${m.text?.plain || ''}</div>
+        </div>
+      </div>`;
+    };
+
     thread.innerHTML = `
       <div style="display:flex;flex-direction:column;height:100%">
-        <div style="padding:14px 16px;border-bottom:1px solid var(--border);font-weight:600">
-          💬 ${buyer || 'Comprador'} <span style="font-size:11px;color:var(--text-2);font-weight:400">· Pedido #${orderId}</span>
+        <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <span style="font-weight:600">💬 ${buyer || 'Comprador'}</span>
+            <span style="font-size:11px;color:var(--text-2);font-weight:400"> · Pedido #${orderId}</span>
+          </div>
+          <button onclick="openConversation('${packId}','${storeId}','${(buyer||'').replace(/'/g,"\\'")}','${orderId}',true)"
+            style="font-size:11px;background:rgba(255,255,255,.06);border:1px solid #333;border-radius:6px;padding:4px 10px;color:#aaa;cursor:pointer">
+            🔄 Atualizar
+          </button>
         </div>
-        <div id="threadMsgs" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;max-height:420px">
-          ${msgs.length ? msgs.map(m => {
-            const isMine = m.from?.user_id == storeId;
-            return `<div style="display:flex;justify-content:${isMine?'flex-end':'flex-start'}">
-              <div style="max-width:75%;padding:10px 14px;border-radius:${isMine?'12px 12px 4px 12px':'12px 12px 12px 4px'};background:${isMine?'rgba(255,230,0,.15)':'rgba(255,255,255,.06)'};font-size:13px">
-                <div style="font-size:10px;color:var(--text-2);margin-bottom:4px">${m.from?.nickname || (isMine?'Você':'Comprador')} · ${fmt.dt(m.created_at)}</div>
-                ${m.text?.plain || ''}
-              </div>
-            </div>`;
-          }).join('') : '<div style="text-align:center;color:var(--text-2);font-size:13px">Nenhuma mensagem ainda.</div>'}
+        ${fromCache ? `<div style="text-align:center;padding:4px;font-size:11px;color:#555;background:rgba(255,255,255,.02)">Exibindo mensagens em cache · clique em Atualizar para buscar ao vivo</div>` : ''}
+        <div id="threadMsgs" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;min-height:0;max-height:400px">
+          ${msgs.length
+            ? msgs.map(renderMsg).join('')
+            : '<div style="text-align:center;color:var(--text-2);font-size:13px;padding:32px">Nenhuma mensagem no cache.<br><br><button onclick="openConversation(\''+packId+'\',\''+storeId+'\',\''+buyer+'\',\''+orderId+'\',true)" style="background:#FFE600;color:#111;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">🔄 Buscar ao vivo</button></div>'}
         </div>
         <div style="padding:12px 16px;border-top:1px solid var(--border)">
           <div style="display:flex;gap:8px;align-items:flex-end">
-            <textarea id="msgInput-${packId}" placeholder="Digite sua resposta..." rows="2"
+            <textarea id="msgInput-${packId}" placeholder="Digite sua resposta... (Ctrl+Enter para enviar)" rows="3"
               style="flex:1;padding:10px 12px;background:#1a1a1a;border:1px solid #333;border-radius:8px;color:#fff;font-size:13px;resize:none;font-family:inherit"
               onkeydown="if(event.ctrlKey&&event.key==='Enter')sendMessage('${packId}','${storeId}')"></textarea>
-            <button class="btn btn-primary" onclick="sendMessage('${packId}','${storeId}')" style="height:44px;padding:0 18px">✉️ Enviar</button>
+            <button class="btn btn-primary" onclick="sendMessage('${packId}','${storeId}')" style="height:60px;padding:0 20px;font-size:14px">✉️<br>Enviar</button>
           </div>
-          <div style="font-size:11px;color:#555;margin-top:4px">Ctrl+Enter para enviar</div>
         </div>
       </div>`;
-    // Scroll para o fim
+
     const msgs_el = document.getElementById('threadMsgs');
     if (msgs_el) msgs_el.scrollTop = msgs_el.scrollHeight;
   } catch (e) {
-    thread.innerHTML = `<div style="padding:24px;color:#ef4444">${e.message}</div>`;
+    thread.innerHTML = `<div style="padding:24px;color:#ef4444;text-align:center">
+      <div style="font-size:32px;margin-bottom:8px">⚠️</div>
+      <div>${e.message}</div>
+      <button onclick="openConversation('${packId}','${storeId}','${buyer}','${orderId}',true)" style="margin-top:12px;background:#FFE600;color:#111;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600">Tentar novamente</button>
+    </div>`;
   }
 };
 

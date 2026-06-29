@@ -2584,12 +2584,51 @@ route('GET', '/api/messages', async (req, res, sess) => {
   const p       = qp(req);
   const storeId = p.get('storeId') || sess.store_id;
   const packId  = p.get('packId');
+  const live    = p.get('live') === '1';
   if (!packId) { apiErr(res, 400, 'packId obrigatório'); return; }
 
+  // Serve do cache local primeiro (rápido, sem rate limit)
+  const cached = db.prepare(
+    'SELECT * FROM messages_cache WHERE pack_id=? AND store_id=? ORDER BY created_at ASC'
+  ).all(packId, storeId);
+
+  if (cached.length && !live) {
+    return ok(res, {
+      messages: cached.map(m => ({
+        id:         m.msg_id,
+        from:       { nickname: m.from_user, user_id: null },
+        text:       { plain: m.text },
+        created_at: m.created_at,
+        _cached:    true,
+      })),
+      source: 'cache',
+    });
+  }
+
+  // Fallback: busca ao vivo no ML (só quando cache vazio ou forçado)
   try {
     const data = await mlFetch(`/messages/packs/${packId}/sellers/${storeId}?tag=post_sale`, {}, storeId);
-    ok(res, { messages: data.messages || [] });
+    const msgs = data.messages || [];
+
+    // Salva no cache para próximas consultas
+    const insert = db.prepare(`INSERT OR IGNORE INTO messages_cache(pack_id,store_id,msg_id,from_user,text,created_at,notified)
+      VALUES(?,?,?,?,?,?,1)`);
+    for (const m of msgs) {
+      insert.run(packId, storeId, String(m.id || m.created_at), m.from?.nickname || String(m.from?.user_id || ''), m.text?.plain || '', m.created_at || '');
+    }
+
+    ok(res, { messages: msgs, source: 'live' });
   } catch (e) {
+    // Se ML falhar mas tiver cache, retorna cache mesmo assim
+    if (cached.length) {
+      return ok(res, {
+        messages: cached.map(m => ({
+          id: m.msg_id, from: { nickname: m.from_user, user_id: null },
+          text: { plain: m.text }, created_at: m.created_at, _cached: true,
+        })),
+        source: 'cache',
+      });
+    }
     apiErr(res, 500, e.message);
   }
 });
