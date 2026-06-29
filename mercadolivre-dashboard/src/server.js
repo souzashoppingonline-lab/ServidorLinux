@@ -650,7 +650,7 @@ const JOB_HANDLERS = {
 
     while (true) {
       const page = await mlFetch(
-        `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${encodeURIComponent(fromISO)}&limit=50&offset=${offset}&sort=date_asc`,
+        `/orders/search?seller=${storeId}&order.status=paid&date_created.from=${encodeURIComponent(fromISO)}&limit=50&offset=${offset}&sort=date_desc`,
         {}, storeId
       );
       if (!page?.results?.length) break;
