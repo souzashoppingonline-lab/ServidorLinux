@@ -26,7 +26,7 @@ const SCHEDULER_CONFIG = {
   batchDelay: 60000,        // 1 minute between listing batch pages
   minDelay: 1000,           // minimum delay between API calls (ms)
   maxCallsPerMinute: 15,    // max API calls per minute (ML free tier ~20/min, leave headroom)
-  ordersInterval: 1800000,  // 30 minutes
+  ordersInterval: 300000,   // 5 minutes
   questionsInterval: 2400000, // 40 minutes
   stockInterval: 7200000,   // 2 hours
   visitsHour: 3,            // 3am for visits sync
