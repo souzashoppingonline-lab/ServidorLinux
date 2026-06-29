@@ -1841,6 +1841,98 @@ route('PUT', '/api/vendas-totais/cost', async (req, res, sess) => {
   ok(res, { ok: true });
 });
 
+// ── CFO Briefing ───────────────────────────────────────────
+route('GET', '/api/cfo-briefing', (req, res, sess) => {
+  const days = parseInt(qp(req).get('days') || '30', 10);
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+  const stores = db.prepare(`SELECT id, nickname, store_color, tax_rate FROM stores WHERE active=1`).all();
+
+  // Revenue & margin per product (all stores)
+  const products = db.prepare(`
+    SELECT
+      oi.item_id, oi.item_title,
+      s.nickname AS store,
+      COUNT(*) AS pedidos,
+      SUM(oi.quantity) AS unidades,
+      ROUND(SUM(oi.unit_price * oi.quantity), 2) AS faturamento,
+      ROUND(AVG(oi.unit_price), 2) AS preco_medio,
+      ROUND(SUM(COALESCE(oc.cost,0)), 2) AS custo_total,
+      ROUND(SUM(COALESCE(oi.sale_fee,0)), 2) AS tarifa_total,
+      ROUND(SUM(COALESCE(o.seller_shipping_cost,0)), 2) AS frete_total,
+      ROUND(SUM((oi.unit_price*oi.quantity)*COALESCE(s.tax_rate,0)/100), 2) AS imposto_total,
+      ROUND(SUM(oi.unit_price*oi.quantity) - SUM(COALESCE(oc.cost,0)) - SUM(COALESCE(oi.sale_fee,0)) - SUM(COALESCE(o.seller_shipping_cost,0)) - SUM((oi.unit_price*oi.quantity)*COALESCE(s.tax_rate,0)/100), 2) AS margem,
+      ROUND(100.0*(SUM(oi.unit_price*oi.quantity) - SUM(COALESCE(oc.cost,0)) - SUM(COALESCE(oi.sale_fee,0)) - SUM(COALESCE(o.seller_shipping_cost,0)) - SUM((oi.unit_price*oi.quantity)*COALESCE(s.tax_rate,0)/100)) / NULLIF(SUM(oi.unit_price*oi.quantity),0), 2) AS mc_pct
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    JOIN stores s ON s.id = o.store_id
+    LEFT JOIN order_costs oc ON oc.order_id=oi.order_id AND oc.item_id=oi.item_id
+    WHERE o.status='paid' AND o.date_created >= ?
+    GROUP BY oi.item_id, o.store_id
+    ORDER BY faturamento DESC
+  `).all(since);
+
+  // Daily revenue trend
+  const daily = db.prepare(`
+    SELECT
+      substr(o.date_created,1,10) AS dia,
+      ROUND(SUM(oi.unit_price*oi.quantity),2) AS faturamento,
+      COUNT(DISTINCT o.id) AS pedidos
+    FROM order_items oi
+    JOIN orders o ON o.id=oi.order_id
+    WHERE o.status='paid' AND o.date_created >= ?
+    GROUP BY dia ORDER BY dia
+  `).all(since);
+
+  // Totals per store
+  const byStore = db.prepare(`
+    SELECT
+      s.nickname,
+      COUNT(DISTINCT o.id) AS pedidos,
+      ROUND(SUM(oi.unit_price*oi.quantity),2) AS faturamento,
+      ROUND(SUM(COALESCE(oc.cost,0)),2) AS custo,
+      ROUND(SUM(COALESCE(oi.sale_fee,0)),2) AS tarifa,
+      ROUND(SUM(COALESCE(o.seller_shipping_cost,0)),2) AS frete_v
+    FROM order_items oi
+    JOIN orders o ON o.id=oi.order_id
+    JOIN stores s ON s.id=o.store_id
+    LEFT JOIN order_costs oc ON oc.order_id=oi.order_id AND oc.item_id=oi.item_id
+    WHERE o.status='paid' AND o.date_created >= ?
+    GROUP BY o.store_id
+  `).all(since);
+
+  // Products with no cost defined (blind spots)
+  const semCusto = db.prepare(`
+    SELECT oi.item_id, oi.item_title, s.nickname AS store,
+      COUNT(*) AS pedidos,
+      ROUND(SUM(oi.unit_price*oi.quantity),2) AS faturamento
+    FROM order_items oi
+    JOIN orders o ON o.id=oi.order_id
+    JOIN stores s ON s.id=o.store_id
+    LEFT JOIN order_costs oc ON oc.order_id=oi.order_id AND oc.item_id=oi.item_id
+    WHERE o.status='paid' AND o.date_created >= ? AND COALESCE(oc.cost,0)=0
+    GROUP BY oi.item_id, o.store_id
+    ORDER BY faturamento DESC LIMIT 20
+  `).all(since);
+
+  const top10 = products.slice(0, 10);
+  const bottom10 = [...products].sort((a,b) => a.faturamento - b.faturamento).slice(0, 10);
+  const worstMargin = [...products].filter(p => p.mc_pct !== null).sort((a,b) => a.mc_pct - b.mc_pct).slice(0, 10);
+  const bestMargin  = [...products].filter(p => p.mc_pct !== null).sort((a,b) => b.mc_pct - a.mc_pct).slice(0, 10);
+
+  ok(res, {
+    periodo: { dias: days, desde: since },
+    lojas: byStore,
+    tendencia_diaria: daily,
+    top10_faturamento: top10,
+    bottom10_faturamento: bottom10,
+    top10_margem: bestMargin,
+    bottom10_margem: worstMargin,
+    sem_custo_cadastrado: semCusto,
+    total_produtos: products.length,
+  });
+});
+
 // ── Dashboard ──────────────────────────────────────────────
 route('GET', '/api/dashboard', (req, res, sess) => {
   const storeId = qp(req).get('storeId') || sess.store_id;
