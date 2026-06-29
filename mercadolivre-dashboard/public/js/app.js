@@ -2981,15 +2981,64 @@ window.vtOpenDetail = (orderId, itemId) => {
       ${row('Data', fmt.date(v.date))}
       ${row('Qtd. × Valor Unit.', `${v.quantity} × ${M(v.unit_price)}`)}
       ${row('Faturamento ML', M(v.faturamento), 'var(--text)')}
-      ${row('Custo (-)', M(v.custo))}
-      ${row('Imposto (-)', `${M(v.imposto)} (${v.tax_rate}%)`)}
-      ${row('Tarifa de Venda (-)', M(v.tarifa))}
-      ${row('Frete Comprador (-)', M(v.frete_comprador))}
-      ${row('Frete Vendedor (-)', M(v.frete_vendedor))}
-      ${row('Margem Contrib. (=)', M(v.margem), mc_cls)}
-      ${row('MC %', v.mc_pct.toFixed(1) + '%', mc_cls)}
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:12px;color:var(--text-2)">Custo (−)</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:11px;color:var(--text-3)">R$</span>
+          <input id="vtModalCostInput" type="number" min="0" step="0.01" value="${v.custo.toFixed(2)}"
+            style="width:90px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-weight:600;text-align:right;background:var(--surface);color:var(--text)"
+            onkeydown="if(event.key==='Enter')vtModalSaveCost('${v.order_id}','${v.item_id}','${v.store_id}')">
+          <button onclick="vtModalSaveCost('${v.order_id}','${v.item_id}','${v.store_id}')"
+            style="padding:4px 10px;font-size:12px;font-weight:700;background:#6366f1;color:#fff;border:none;border-radius:6px;cursor:pointer">
+            Salvar
+          </button>
+        </div>
+      </div>
+      ${row('Imposto (−)', `${M(v.imposto)} (${v.tax_rate}%)`)}
+      ${row('Tarifa de Venda (−)', M(v.tarifa))}
+      ${row('Frete Comprador', M(v.frete_comprador))}
+      ${row('Frete Vendedor (−)', M(v.frete_vendedor))}
+      <div id="vtModalMargemRow">${row('Margem Contrib. (=)', M(v.margem), mc_cls)}${row('MC %', v.mc_pct.toFixed(1) + '%', mc_cls)}</div>
     </div>
   `);
+};
+
+window.vtModalSaveCost = async (orderId, itemId, storeId) => {
+  const input = document.getElementById('vtModalCostInput');
+  if (!input) return;
+  const cost = parseFloat(input.value) || 0;
+  const btn = input.nextElementSibling;
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+  try {
+    await API.put('/api/vendas-totais/cost', { order_id: orderId, item_id: itemId, store_id: storeId, cost });
+    // Update cache and recalc margin live
+    const key = `${orderId}_${itemId}`;
+    const v = _vtCache.get(key);
+    if (v) {
+      v.custo = cost;
+      v.margem = v.faturamento - cost - v.imposto - v.tarifa - v.frete_vendedor;
+      v.mc_pct = v.faturamento > 0 ? (v.margem / v.faturamento) * 100 : 0;
+      _vtCache.set(key, v);
+      const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
+      const M = fmt.brl;
+      const mRow = document.getElementById('vtModalMargemRow');
+      if (mRow) mRow.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:12px;color:var(--text-2)">Margem Contrib. (=)</span>
+          <span style="font-size:13px;font-weight:700;color:${mc_cls}">${M(v.margem)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:12px;color:var(--text-2)">MC %</span>
+          <span style="font-size:13px;font-weight:700;color:${mc_cls}">${v.mc_pct.toFixed(1)}%</span>
+        </div>`;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = '✓ Salvo'; btn.style.background = '#10b981'; }
+    setTimeout(() => { if (btn) { btn.textContent = 'Salvar'; btn.style.background = '#6366f1'; } }, 2000);
+    vtLoad(); // refresh table
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Erro'; btn.style.background = '#ef4444'; }
+    setTimeout(() => { if (btn) { btn.textContent = 'Salvar'; btn.style.background = '#6366f1'; } }, 2000);
+  }
 };
 
 window.vtClearDates = () => {
