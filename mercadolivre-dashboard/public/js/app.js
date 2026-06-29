@@ -111,6 +111,7 @@ const PAGES = {
   scheduler:        renderScheduler,
   ads:              renderAds,
   customers:        renderCustomers,
+  'vendas-totais':  renderVendasTotais,
 };
 
 const PAGE_TITLES = {
@@ -128,6 +129,7 @@ const PAGE_TITLES = {
   scheduler:        'Scheduler',
   ads:              'Publicidade (Mercado Ads)',
   customers:        'Clientes',
+  'vendas-totais':  'Vendas Totais',
 };
 
 function navigate(page) {
@@ -1203,7 +1205,7 @@ async function renderStores() {
 
             <div style="display:flex;gap:6px;margin-top:10px">
               <button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>
-              <button class="btn btn-sm btn-outline" onclick="window.editStore('${s.id}','${s.nickname}','${s.store_color||'#FFE600'}','${s.store_icon||'🏪'}')" title="Personalizar">✏</button>
+              <button class="btn btn-sm btn-outline" onclick="window.editStore('${s.id}','${s.nickname}','${s.store_color||'#FFE600'}','${s.store_icon||'🏪'}',${s.tax_rate||0})" title="Personalizar">✏</button>
               ${stores.length > 1 ? `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" title="Desconectar" onclick="disconnectStore('${s.id}','${s.nickname}')">🗑</button>` : ''}
             </div>
           </div>
@@ -1250,7 +1252,7 @@ window.switchStore = (id) => {
   toast('Loja selecionada', 'success');
 };
 
-window.editStore = (id, nickname, color, icon) => {
+window.editStore = (id, nickname, color, icon, taxRate) => {
   Modal.open('Personalizar Loja', `
     <div style="display:flex;flex-direction:column;gap:14px">
       <div>
@@ -1268,6 +1270,13 @@ window.editStore = (id, nickname, color, icon) => {
         <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Ícone (emoji)</label>
         <input id="editStoreIcon" type="text" class="input" value="${icon}" style="width:80px;font-size:20px;text-align:center">
       </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Imposto % <span style="font-weight:400;color:var(--text-3)">(aplicado em Vendas Totais)</span></label>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input id="editStoreTax" type="number" class="input" value="${taxRate || 0}" min="0" max="100" step="0.01" style="width:100px">
+          <span style="font-size:12px;color:var(--text-3)">Ex: 4 para 4% sobre o Faturamento ML</span>
+        </div>
+      </div>
     </div>
   `, `
     <button class="btn btn-secondary" onclick="Modal.close()">Cancelar</button>
@@ -1279,8 +1288,9 @@ window.saveStoreEdit = async (id) => {
   const nickname    = document.getElementById('editStoreName')?.value?.trim();
   const store_color = document.getElementById('editStoreColor')?.value;
   const store_icon  = document.getElementById('editStoreIcon')?.value?.trim();
+  const tax_rate    = parseFloat(document.getElementById('editStoreTax')?.value || '0') || 0;
   try {
-    await API.put(`/api/stores?id=${id}`, { nickname, store_color, store_icon });
+    await API.put(`/api/stores?id=${id}`, { nickname, store_color, store_icon, tax_rate });
     toast('Loja atualizada!', 'success');
     Modal.close();
     renderStores();
@@ -2865,6 +2875,185 @@ window.openCustomer = async function(buyerId, nickname) {
     Modal.open('Erro', `<p style="color:#ef4444">${e.message}</p>`);
   }
 };
+
+// ============================================================
+// VENDAS TOTAIS
+// ============================================================
+const VT = {
+  offset: 0,
+  limit: 50,
+  sort: 'date',
+  order: 'desc',
+  storeFilter: '',
+};
+
+async function renderVendasTotais() {
+  VT.offset = 0;
+  setContent(`
+    <div class="page-header">
+      <div>
+        <div class="page-title">Vendas Totais</div>
+        <div class="page-subtitle">Todas as vendas de todas as lojas consolidadas</div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="vtStoreFilter" class="input" style="font-size:13px" onchange="vtApplyFilter()">
+          <option value="">Todas as lojas</option>
+          ${(State.stores || []).map(s => `<option value="${s.id}">${s.store_icon || '🏪'} ${s.nickname}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div id="vtContent"><div class="loading-state"><div class="spinner"></div><p>Carregando...</p></div></div>
+  `);
+  await vtLoad();
+}
+
+window.vtApplyFilter = () => {
+  VT.storeFilter = document.getElementById('vtStoreFilter')?.value || '';
+  VT.offset = 0;
+  vtLoad();
+};
+
+window.vtPage = (offset) => {
+  VT.offset = offset;
+  vtLoad();
+};
+
+window.vtSort = (col) => {
+  if (VT.sort === col) { VT.order = VT.order === 'asc' ? 'desc' : 'asc'; }
+  else { VT.sort = col; VT.order = 'desc'; }
+  vtLoad();
+};
+
+window.vtEditCost = (orderId, itemId, storeId, currentCost) => {
+  const input = document.getElementById(`cost_${orderId}_${itemId}`);
+  if (!input) return;
+  input.readOnly = false;
+  input.focus();
+  input.select();
+  input.dataset.original = currentCost;
+};
+
+window.vtSaveCost = async (orderId, itemId, storeId) => {
+  const input = document.getElementById(`cost_${orderId}_${itemId}`);
+  if (!input) return;
+  const cost = parseFloat(input.value.replace(',', '.')) || 0;
+  input.readOnly = true;
+  try {
+    await API.put('/api/vendas-totais/cost', { order_id: orderId, item_id: itemId, store_id: storeId, cost });
+    toast('Custo salvo', 'success');
+    vtLoad();
+  } catch (e) {
+    toast(e.message, 'error');
+    input.value = input.dataset.original || '0';
+  }
+};
+
+async function vtLoad() {
+  const wrap = document.getElementById('vtContent');
+  if (!wrap) return;
+
+  try {
+    const qs = new URLSearchParams({
+      limit:  VT.limit,
+      offset: VT.offset,
+      sort:   VT.sort,
+      order:  VT.order,
+      ...(VT.storeFilter ? { storeId: VT.storeFilter } : {}),
+    });
+    const data = await API.get(`/api/vendas-totais?${qs}`);
+    const { vendas, paging } = data;
+
+    const M = fmt.brl;
+    const thStyle = 'padding:8px 10px;font-size:11px;font-weight:700;text-transform:uppercase;color:var(--text-2);white-space:nowrap;cursor:pointer;user-select:none';
+    const sortArrow = (col) => VT.sort === col ? (VT.order === 'asc' ? ' ▲' : ' ▼') : '';
+
+    const rows = vendas.map(v => {
+      const mc_cls = v.mc_pct >= 20 ? '#10b981' : v.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
+      return `
+        <tr>
+          <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px" title="${v.item_title}">${v.item_title}</td>
+          <td>
+            <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:700;background:${v.store_color||'#FFE600'}22;border:1px solid ${v.store_color||'#FFE600'}">
+              ${v.store_icon||'🏪'} ${v.store_name}
+            </span>
+          </td>
+          <td style="font-family:monospace;font-size:11px;color:var(--text-2)">${v.sku||'-'}</td>
+          <td style="font-size:12px;white-space:nowrap">${fmt.dt(v.date)}</td>
+          <td style="text-align:right;font-size:12px;color:var(--text-3)">-</td>
+          <td style="text-align:right;font-size:12px">${M(v.unit_price)}</td>
+          <td style="text-align:center;font-size:12px">${v.quantity}</td>
+          <td style="text-align:right;font-weight:700;font-size:12px">${M(v.faturamento)}</td>
+          <td style="text-align:right">
+            <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end">
+              <input
+                id="cost_${v.order_id}_${v.item_id}"
+                type="number" step="0.01" min="0"
+                value="${v.custo.toFixed(2)}"
+                readonly
+                style="width:80px;font-size:12px;text-align:right;border:1px solid var(--border);border-radius:4px;padding:2px 4px;background:var(--surface);color:var(--text)"
+                onclick="vtEditCost('${v.order_id}','${v.item_id}','${v.store_id}',${v.custo})"
+                onblur="vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}')"
+                onkeydown="if(event.key==='Enter'){vtSaveCost('${v.order_id}','${v.item_id}','${v.store_id}');this.blur()}"
+              >
+            </div>
+          </td>
+          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.imposto)} <span style="font-size:10px">(${v.tax_rate}%)</span></td>
+          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.tarifa)}</td>
+          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.frete_comprador)}</td>
+          <td style="text-align:right;font-size:12px;color:var(--text-2)">${M(v.frete_vendedor)}</td>
+          <td style="text-align:right;font-weight:700;font-size:12px;color:${mc_cls}">${M(v.margem)}</td>
+          <td style="text-align:right;font-weight:700;font-size:12px;color:${mc_cls}">${v.mc_pct.toFixed(1)}%</td>
+        </tr>
+      `;
+    }).join('');
+
+    const totalPages = Math.ceil(paging.total / paging.limit);
+    const curPage    = Math.floor(paging.offset / paging.limit) + 1;
+    const pagination = totalPages > 1 ? `
+      <div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:16px">
+        ${paging.offset > 0 ? `<button class="btn btn-sm btn-outline" onclick="vtPage(${paging.offset - paging.limit})">← Anterior</button>` : ''}
+        <span style="font-size:13px;color:var(--text-2)">Página ${curPage} de ${totalPages} — ${paging.total} registros</span>
+        ${paging.offset + paging.limit < paging.total ? `<button class="btn btn-sm btn-outline" onclick="vtPage(${paging.offset + paging.limit})">Próxima →</button>` : ''}
+      </div>
+    ` : `<div style="font-size:12px;color:var(--text-2);text-align:center;margin-top:8px">${paging.total} registro${paging.total !== 1 ? 's' : ''}</div>`;
+
+    wrap.innerHTML = `
+      <div class="card" style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse">
+          <thead>
+            <tr style="border-bottom:2px solid var(--border)">
+              <th style="${thStyle}" onclick="vtSort('title')">Anúncio${sortArrow('title')}</th>
+              <th style="${thStyle}" onclick="vtSort('loja')">Conta${sortArrow('loja')}</th>
+              <th style="${thStyle}">SKU</th>
+              <th style="${thStyle}" onclick="vtSort('date')">Data${sortArrow('date')}</th>
+              <th style="${thStyle};text-align:right">Frete</th>
+              <th style="${thStyle};text-align:right">Valor Unit.</th>
+              <th style="${thStyle};text-align:center">Qtd.</th>
+              <th style="${thStyle};text-align:right" onclick="vtSort('faturamento')">Faturamento ML${sortArrow('faturamento')}</th>
+              <th style="${thStyle};text-align:right" onclick="vtSort('custo')">Custo (-)</th>
+              <th style="${thStyle};text-align:right">Imposto (-)</th>
+              <th style="${thStyle};text-align:right">Tarifa Venda (-)</th>
+              <th style="${thStyle};text-align:right">Frete Comprador (-)</th>
+              <th style="${thStyle};text-align:right">Frete Vendedor (-)</th>
+              <th style="${thStyle};text-align:right">Margem Contrib. (=)</th>
+              <th style="${thStyle};text-align:right">MC %</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows || `<tr><td colspan="15" style="padding:32px;text-align:center;color:var(--text-2)">Nenhuma venda encontrada</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <div style="font-size:11px;color:var(--text-3);margin-top:8px;padding:0 4px">
+        💡 Clique no campo <strong>Custo (-)</strong> para editar. Tarifa de Venda, Frete Comprador e Frete Vendedor serão preenchidos automaticamente quando disponíveis na API do ML.
+        Para configurar o <strong>Imposto %</strong> de cada loja, acesse <a href="#stores" onclick="navigate('stores')" style="color:var(--primary)">Lojas → Personalizar</a>.
+      </div>
+      ${pagination}
+    `;
+  } catch (e) {
+    wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro ao carregar</h3><p>${e.message}</p></div>`;
+  }
+}
 
 // ============================================================
 // BOOT

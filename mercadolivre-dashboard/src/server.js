@@ -254,12 +254,27 @@ for (const col of [
   "ALTER TABLE stores ADD COLUMN sync_status TEXT DEFAULT 'idle'",
   "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT 0",
   "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
+  "ALTER TABLE stores ADD COLUMN tax_rate REAL DEFAULT 0",
   // Audit table index
   "CREATE INDEX IF NOT EXISTS idx_sync_audit_store ON sync_audit(store_id, started_at DESC)",
   "CREATE INDEX IF NOT EXISTS idx_api_log_store ON api_log(store_id, logged_at DESC)",
 ]) {
   try { db.exec(col); } catch {}
 }
+
+// Order costs — manual COGS per order item
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS order_costs (
+      order_id  TEXT NOT NULL,
+      item_id   TEXT NOT NULL,
+      store_id  TEXT NOT NULL,
+      cost      REAL DEFAULT 0,
+      updated_at INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (order_id, item_id)
+    )
+  `);
+} catch {}
 
 // Reputation table
 try {
@@ -1653,12 +1668,102 @@ route('GET', '/api/stores/sync-status', (req, res, sess) => {
 route('PUT', '/api/stores', (req, res, sess) => {
   const body = parseBody(req);
   const id   = qp(req).get('id') || sess.store_id;
-  const allowed = ['store_color', 'store_icon', 'nickname'];
+  const allowed = ['store_color', 'store_icon', 'nickname', 'tax_rate'];
   const updates = {};
   allowed.forEach(f => { if (body[f] !== undefined) updates[f] = body[f]; });
   if (!Object.keys(updates).length) { apiErr(res, 400, 'Nenhum campo válido para atualizar'); return; }
   const sets = Object.keys(updates).map(k => `${k}=?`).join(',');
   db.prepare(`UPDATE stores SET ${sets} WHERE id=?`).run(...Object.values(updates), id);
+  ok(res, { ok: true });
+});
+
+// ── Vendas Totais ──────────────────────────────────────────
+route('GET', '/api/vendas-totais', (req, res, sess) => {
+  const p      = qp(req);
+  const limit  = Math.min(parseInt(p.get('limit') || '50', 10), 200);
+  const offset = parseInt(p.get('offset') || '0', 10);
+  const sortCol = { date: 'o.date_created', faturamento: 'faturamento', custo: 'oc_cost', loja: 's.nickname' }[p.get('sort')] || 'o.date_created';
+  const sortDir = p.get('order') === 'asc' ? 'ASC' : 'DESC';
+  const storeFilter = p.get('storeId'); // optional — omit to get all
+
+  const where = storeFilter ? `AND o.store_id=?` : '';
+  const params = storeFilter ? [storeFilter] : [];
+
+  const rows = db.prepare(`
+    SELECT
+      oi.order_id, oi.item_id, oi.item_title, oi.quantity, oi.unit_price,
+      o.date_created, o.store_id, o.total_amount,
+      s.nickname  AS store_name,
+      s.store_color,
+      s.store_icon,
+      COALESCE(s.tax_rate, 0)  AS tax_rate,
+      COALESCE(l.seller_sku, '') AS sku,
+      COALESCE(oc.cost, 0) AS oc_cost,
+      (oi.unit_price * oi.quantity) AS faturamento
+    FROM order_items oi
+    JOIN orders o  ON o.id = oi.order_id
+    JOIN stores s  ON s.id = o.store_id
+    LEFT JOIN listings l    ON l.id = oi.item_id AND l.store_id = oi.store_id
+    LEFT JOIN order_costs oc ON oc.order_id = oi.order_id AND oc.item_id = oi.item_id
+    WHERE o.status = 'paid' ${where}
+    ORDER BY ${sortCol} ${sortDir}
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+
+  const total = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status = 'paid' ${where}
+  `).get(...params).n;
+
+  const vendas = rows.map(r => {
+    const fat      = r.faturamento || 0;
+    const custo    = r.oc_cost     || 0;
+    const imposto  = fat * (r.tax_rate / 100);
+    // tarifa_venda, frete_comprador, frete_vendedor — not stored in DB yet (show 0)
+    const tarifa   = 0;
+    const frete_c  = 0;
+    const frete_v  = 0;
+    const margem   = fat - custo - imposto - tarifa - frete_c - frete_v;
+    const mc_pct   = fat > 0 ? (margem / fat) * 100 : 0;
+    return {
+      order_id:    r.order_id,
+      item_id:     r.item_id,
+      item_title:  r.item_title,
+      sku:         r.sku,
+      date:        r.date_created,
+      store_id:    r.store_id,
+      store_name:  r.store_name,
+      store_color: r.store_color,
+      store_icon:  r.store_icon,
+      tax_rate:    r.tax_rate,
+      unit_price:  r.unit_price,
+      quantity:    r.quantity,
+      faturamento:     fat,
+      custo,
+      imposto,
+      tarifa,
+      frete_comprador: frete_c,
+      frete_vendedor:  frete_v,
+      margem,
+      mc_pct,
+    };
+  });
+
+  ok(res, { vendas, paging: { total, limit, offset } });
+});
+
+route('PUT', '/api/vendas-totais/cost', async (req, res, sess) => {
+  const body = await readBody(req);
+  const { order_id, item_id, store_id, cost } = body;
+  if (!order_id || !item_id) { apiErr(res, 400, 'order_id e item_id obrigatórios'); return; }
+  const c = parseFloat(cost) || 0;
+  db.prepare(`
+    INSERT INTO order_costs(order_id, item_id, store_id, cost, updated_at)
+    VALUES(?,?,?,?,unixepoch())
+    ON CONFLICT(order_id, item_id) DO UPDATE SET cost=excluded.cost, updated_at=unixepoch()
+  `).run(order_id, item_id, store_id || '', c);
   ok(res, { ok: true });
 });
 
