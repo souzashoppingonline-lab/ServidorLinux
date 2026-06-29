@@ -1781,7 +1781,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
   const tar_t    = totRow.tarifa_total || 0;
   const fretec_t = totRow.frete_c_total|| 0;
   const fretev_t = totRow.frete_v_total|| 0;
-  const margem_t = fat_t - custo_t - imp_t - tar_t - fretec_t - fretev_t;
+  const margem_t = fat_t - custo_t - imp_t - tar_t - fretev_t;
   const mc_pct_t = fat_t > 0 ? (margem_t / fat_t) * 100 : 0;
 
   const totals = {
@@ -1806,7 +1806,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     const tarifa   = r.sale_fee     || 0;
     const frete_c  = r.buyer_shipping_cost  || 0;
     const frete_v  = r.seller_shipping_cost || 0;
-    const margem   = fat - custo - imposto - tarifa - frete_c - frete_v;
+    const margem   = fat - custo - imposto - tarifa - frete_v;
     const mc_pct   = fat > 0 ? (margem / fat) * 100 : 0;
     return {
       order_id:    r.order_id,
