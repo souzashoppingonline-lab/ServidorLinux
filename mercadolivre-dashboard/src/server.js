@@ -693,15 +693,11 @@ const JOB_HANDLERS = {
           try {
             const ship = await mlFetch(`/shipments/${shippingId}`, {}, storeId);
             const logType  = ship?.logistic_type || '';
-            const baseCost =
-              ship?.base_cost ||
-              ship?.cost?.gross ||
-              ship?.cost?.net ||
-              ship?.shipping_cost ||
-              ship?.costs?.shipping ||
-              0;
-            // Log first shipment per sync to diagnose cost fields
-            if (i === 0) console.log(`[shipment] id=${shippingId} logistic_type=${logType} base_cost=${ship?.base_cost} cost=${JSON.stringify(ship?.cost)} keys=${Object.keys(ship||{}).join(',')}`);
+            // cost_components is an array of {type, amount} used for FULL fulfillment
+            const costComponents = Array.isArray(ship?.cost_components) ? ship.cost_components : [];
+            const componentTotal = costComponents.reduce((s, c) => s + (c.amount || c.cost || 0), 0);
+            if (i === 0) console.log(`[shipment] id=${shippingId} type=${logType} base_cost=${ship?.base_cost} cost_components=${JSON.stringify(costComponents)}`);
+            const baseCost = ship?.base_cost || componentTotal || 0;
             updateSellerShipping.run(baseCost, logType, orderId);
           } catch { /* ignore individual failures */ }
         }));
