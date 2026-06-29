@@ -911,18 +911,19 @@ window.ordersPage = (offset) => {
 // ============================================================
 // PAGE: QUESTIONS
 // ============================================================
-let questionsState = { status: 'UNANSWERED', offset: 0, limit: 20 };
+let questionsState = { status: 'UNANSWERED', offset: 0, limit: 30 };
 
 async function renderQuestions() {
   setContent(`
     <div class="page-header">
       <div>
         <div class="page-title">Perguntas</div>
-        <div class="page-subtitle">Responda perguntas dos compradores</div>
+        <div class="page-subtitle">Todas as lojas — responda diretamente pelo painel</div>
       </div>
     </div>
     <div class="filters">
-      ${['UNANSWERED','ANSWERED'].map(s => `<button class="period-btn ${questionsState.status===s?'active':''}" onclick="setQuestionStatus('${s}')">${s==='UNANSWERED'?'Sem resposta':'Respondidas'}</button>`).join('')}
+      <button class="period-btn active"  id="qbtn-UNANSWERED" onclick="setQuestionStatus('UNANSWERED')">❓ Sem resposta</button>
+      <button class="period-btn"         id="qbtn-ANSWERED"   onclick="setQuestionStatus('ANSWERED')">✅ Respondidas</button>
     </div>
     <div id="questionsBody"><div class="loading-state"><div class="spinner"></div></div></div>
   `);
@@ -932,9 +933,9 @@ async function renderQuestions() {
 window.setQuestionStatus = async (status) => {
   questionsState.status = status;
   questionsState.offset = 0;
-  document.querySelectorAll('.period-btn').forEach(b => {
-    b.classList.toggle('active', (status==='UNANSWERED'&&b.textContent==='Sem resposta')||(status==='ANSWERED'&&b.textContent==='Respondidas'));
-  });
+  document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+  const btn = document.getElementById(`qbtn-${status}`);
+  if (btn) btn.classList.add('active');
   await loadQuestions();
 };
 
@@ -942,51 +943,58 @@ async function loadQuestions() {
   const wrap = document.getElementById('questionsBody');
   if (!wrap) return;
   wrap.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
-
   try {
-    const data = await API.questions(State.currentStore, questionsState);
-
+    const data = await API.get(`/api/questions/all?status=${questionsState.status}&limit=${questionsState.limit}&offset=${questionsState.offset}`);
     if (!data.questions.length) {
-      wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">✅</div><h3>Nenhuma pergunta</h3><p>${questionsState.status==='UNANSWERED'?'Nenhuma pergunta pendente. Tudo em dia!':'Nenhuma pergunta respondida encontrada.'}</p></div>`;
+      wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">✅</div><h3>Nenhuma pergunta</h3><p>${questionsState.status==='UNANSWERED'?'Nenhuma pergunta pendente. Tudo em dia!':'Nenhuma pergunta respondida.'}</p></div>`;
       return;
     }
-
     wrap.innerHTML = data.questions.map(q => `
-      <div class="question-card ${q.answer ? 'answered' : ''}" id="q-${q.id}">
-        <div class="question-header">
-          <div style="flex:1">
-            ${q.item_title ? `<div class="question-item">📦 ${q.item_title}</div>` : ''}
-            <div class="question-text">"${q.text}"</div>
-            <div class="question-meta">👤 ${q.from?.nickname || 'Comprador'} · 📅 ${fmt.dt(q.date)}</div>
+      <div class="question-card ${q.answer ? 'answered' : ''}" id="q-${q.id}" style="border-radius:10px;background:var(--card-bg);border:1px solid var(--border);padding:16px;margin-bottom:12px">
+        <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:10px">
+          <div style="flex:1;min-width:0">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+              <span style="font-size:11px;background:rgba(255,230,0,.15);color:#FFE600;border-radius:4px;padding:2px 8px;font-weight:600">${q.store_name || ''}</span>
+              <span style="font-size:11px;color:var(--text-2)">👤 ${q.from?.nickname || 'Comprador'}</span>
+              <span style="font-size:11px;color:var(--text-2)">📅 ${fmt.dt(q.date)}</span>
+            </div>
+            ${q.item_title ? `<div style="font-size:12px;color:var(--text-2);margin-bottom:6px">📦 ${q.item_title}</div>` : ''}
+            <div style="font-size:15px;font-weight:500;color:var(--text-1);background:rgba(255,255,255,.04);border-radius:8px;padding:10px 12px;border-left:3px solid #FFE600">"${q.text}"</div>
           </div>
-          ${badge({ UNANSWERED: { label: 'Pendente', cls: 'badge-yellow' }, ANSWERED: { label: 'Respondida', cls: 'badge-green' } }, q.status)}
         </div>
         ${q.answer
-          ? `<div class="answer-text">✅ <strong>Sua resposta:</strong> ${q.answer.text}</div>`
-          : `<div class="answer-form">
-              <textarea class="answer-textarea" id="ans-${q.id}" placeholder="Digite sua resposta aqui..." rows="3"></textarea>
-              <div style="display:flex;justify-content:flex-end;margin-top:8px">
-                <button class="btn btn-primary btn-sm" onclick="sendAnswer(${q.id})">✉️ Responder</button>
+          ? `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#86efac">✅ <strong>Sua resposta:</strong> ${q.answer.text}</div>`
+          : `<div style="margin-top:8px">
+              <textarea id="ans-${q.id}" placeholder="Digite sua resposta..." rows="2"
+                style="width:100%;padding:10px 12px;background:#1a1a1a;border:1px solid #333;border-radius:8px;color:#fff;font-size:13px;resize:vertical;box-sizing:border-box;font-family:inherit"
+                onkeydown="if(event.ctrlKey&&event.key==='Enter')sendAnswer('${q.id}','${q.store_id}')"></textarea>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+                <span style="font-size:11px;color:#555">Ctrl+Enter para enviar</span>
+                <button class="btn btn-primary btn-sm" onclick="sendAnswer('${q.id}','${q.store_id}')">✉️ Responder</button>
               </div>
-             </div>`}
+            </div>`}
       </div>
-    `).join('') + paginationHtml(questionsState.offset, questionsState.limit, data.paging?.total || data.questions.length, 'questionsPage');
+    `).join('') + paginationHtml(questionsState.offset, questionsState.limit, data.paging?.total || 0, 'questionsPage');
   } catch (e) {
     wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`;
   }
 }
 
-window.sendAnswer = async (qid) => {
-  const ta = document.getElementById(`ans-${qid}`);
+window.sendAnswer = async (qid, storeId) => {
+  const ta  = document.getElementById(`ans-${qid}`);
   const text = ta?.value?.trim();
   if (!text) { toast('Escreva uma resposta antes de enviar.', 'error'); return; }
-  const btn = ta.nextElementSibling?.querySelector('button');
+  const card = document.getElementById(`q-${qid}`);
+  const btn  = card?.querySelector('button');
   if (btn) { btn.disabled = true; btn.textContent = 'Enviando...'; }
   try {
-    await API.answer(qid, text, State.currentStore);
+    await API.answer(qid, text, storeId);
     toast('Resposta enviada!', 'success');
-    document.getElementById(`q-${qid}`).classList.add('answered');
-    ta.parentElement.innerHTML = `<div class="answer-text">✅ <strong>Sua resposta:</strong> ${text}</div>`;
+    const form = ta?.parentElement;
+    if (form) form.outerHTML = `<div style="background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);border-radius:8px;padding:10px 12px;font-size:13px;color:#86efac;margin-top:8px">✅ <strong>Sua resposta:</strong> ${text}</div>`;
+    // Atualiza badge
+    _notifCounts.questions = Math.max(0, _notifCounts.questions - 1);
+    setBadge('questionsBadge', _notifCounts.questions);
   } catch (e) {
     toast(e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = '✉️ Responder'; }
@@ -1006,21 +1014,125 @@ async function renderMessages() {
     <div class="page-header">
       <div>
         <div class="page-title">Mensagens</div>
-        <div class="page-subtitle">Comunicação pós-venda com compradores</div>
+        <div class="page-subtitle">Conversas pós-venda — todas as lojas</div>
       </div>
     </div>
-    <div class="card">
-      <div style="text-align:center;padding:32px 0">
-        <div style="font-size:48px;margin-bottom:16px">💬</div>
-        <h3 style="margin-bottom:8px">Mensagens por Pedido</h3>
-        <p style="color:var(--text-2);font-size:14px;max-width:380px;margin:0 auto 20px">
-          As mensagens são organizadas por pedido. Acesse um pedido e clique em "Ver mensagens" para se comunicar com o comprador.
-        </p>
-        <button class="btn btn-primary" onclick="navigate('orders')">🛒 Ir para Pedidos</button>
-      </div>
-    </div>
+    <div id="msgInbox"><div class="loading-state"><div class="spinner"></div></div></div>
   `);
+  await loadMessagesInbox();
 }
+
+async function loadMessagesInbox() {
+  const wrap = document.getElementById('msgInbox');
+  if (!wrap) return;
+  try {
+    const data = await API.get('/api/messages/inbox');
+    const convs = data.conversations || [];
+    if (!convs.length) {
+      wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">💬</div><h3>Nenhuma conversa</h3><p>As mensagens aparecem aqui quando compradores entrarem em contato.</p></div>`;
+      return;
+    }
+    wrap.innerHTML = `
+      <div style="display:grid;grid-template-columns:320px 1fr;gap:16px;min-height:500px">
+        <div id="convList" style="background:var(--card-bg);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+          ${convs.map((c,i) => `
+            <div id="conv-item-${c.pack_id}" onclick="openConversation('${c.pack_id}','${c.store_id}','${(c.buyer||'').replace(/'/g,"\\'")}','${c.order_id}')"
+              style="padding:14px 16px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s${i===0?';background:rgba(255,230,0,.06)':''}"
+              onmouseover="this.style.background='rgba(255,255,255,.04)'" onmouseout="this.style.background='${i===0?'rgba(255,230,0,.06)':'transparent'}'">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <span style="font-weight:600;font-size:13px">${c.buyer || 'Comprador'}</span>
+                <span style="font-size:10px;color:var(--text-2)">${c.last_date ? fmt.dt(c.last_date) : ''}</span>
+              </div>
+              <div style="font-size:11px;color:#FFE600;margin-bottom:3px">${c.store_name}</div>
+              <div style="font-size:12px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${c.last_text || 'Pedido #'+c.order_id}</div>
+            </div>
+          `).join('')}
+        </div>
+        <div id="convThread" style="background:var(--card-bg);border:1px solid var(--border);border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:14px">
+          ← Selecione uma conversa
+        </div>
+      </div>`;
+    // Abre a primeira conversa automaticamente
+    if (convs.length) openConversation(convs[0].pack_id, convs[0].store_id, convs[0].buyer || '', convs[0].order_id);
+  } catch (e) {
+    wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">⚠️</div><h3>Erro</h3><p>${e.message}</p></div>`;
+  }
+}
+
+window.openConversation = async (packId, storeId, buyer, orderId) => {
+  // Destaca item ativo
+  document.querySelectorAll('#convList > div').forEach(el => el.style.background = 'transparent');
+  const active = document.getElementById(`conv-item-${packId}`);
+  if (active) active.style.background = 'rgba(255,230,0,.08)';
+
+  const thread = document.getElementById('convThread');
+  if (!thread) return;
+  thread.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+  try {
+    const data = await API.messages(storeId, packId);
+    const msgs  = data.messages || [];
+    thread.innerHTML = `
+      <div style="display:flex;flex-direction:column;height:100%">
+        <div style="padding:14px 16px;border-bottom:1px solid var(--border);font-weight:600">
+          💬 ${buyer || 'Comprador'} <span style="font-size:11px;color:var(--text-2);font-weight:400">· Pedido #${orderId}</span>
+        </div>
+        <div id="threadMsgs" style="flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px;max-height:420px">
+          ${msgs.length ? msgs.map(m => {
+            const isMine = m.from?.user_id == storeId;
+            return `<div style="display:flex;justify-content:${isMine?'flex-end':'flex-start'}">
+              <div style="max-width:75%;padding:10px 14px;border-radius:${isMine?'12px 12px 4px 12px':'12px 12px 12px 4px'};background:${isMine?'rgba(255,230,0,.15)':'rgba(255,255,255,.06)'};font-size:13px">
+                <div style="font-size:10px;color:var(--text-2);margin-bottom:4px">${m.from?.nickname || (isMine?'Você':'Comprador')} · ${fmt.dt(m.created_at)}</div>
+                ${m.text?.plain || ''}
+              </div>
+            </div>`;
+          }).join('') : '<div style="text-align:center;color:var(--text-2);font-size:13px">Nenhuma mensagem ainda.</div>'}
+        </div>
+        <div style="padding:12px 16px;border-top:1px solid var(--border)">
+          <div style="display:flex;gap:8px;align-items:flex-end">
+            <textarea id="msgInput-${packId}" placeholder="Digite sua resposta..." rows="2"
+              style="flex:1;padding:10px 12px;background:#1a1a1a;border:1px solid #333;border-radius:8px;color:#fff;font-size:13px;resize:none;font-family:inherit"
+              onkeydown="if(event.ctrlKey&&event.key==='Enter')sendMessage('${packId}','${storeId}')"></textarea>
+            <button class="btn btn-primary" onclick="sendMessage('${packId}','${storeId}')" style="height:44px;padding:0 18px">✉️ Enviar</button>
+          </div>
+          <div style="font-size:11px;color:#555;margin-top:4px">Ctrl+Enter para enviar</div>
+        </div>
+      </div>`;
+    // Scroll para o fim
+    const msgs_el = document.getElementById('threadMsgs');
+    if (msgs_el) msgs_el.scrollTop = msgs_el.scrollHeight;
+  } catch (e) {
+    thread.innerHTML = `<div style="padding:24px;color:#ef4444">${e.message}</div>`;
+  }
+};
+
+window.sendMessage = async (packId, storeId) => {
+  const ta   = document.getElementById(`msgInput-${packId}`);
+  const text  = ta?.value?.trim();
+  if (!text) return;
+  const btn = ta?.nextElementSibling;
+  if (btn) { btn.disabled = true; btn.textContent = 'Enviando...'; }
+  try {
+    await API.sendMsg(storeId, packId, text);
+    ta.value = '';
+    toast('Mensagem enviada!', 'success');
+    // Adiciona a mensagem na thread sem recarregar
+    const msgs_el = document.getElementById('threadMsgs');
+    if (msgs_el) {
+      const div = document.createElement('div');
+      div.style.cssText = 'display:flex;justify-content:flex-end';
+      div.innerHTML = `<div style="max-width:75%;padding:10px 14px;border-radius:12px 12px 4px 12px;background:rgba(255,230,0,.15);font-size:13px">
+        <div style="font-size:10px;color:var(--text-2);margin-bottom:4px">Você · agora</div>${text}</div>`;
+      msgs_el.appendChild(div);
+      msgs_el.scrollTop = msgs_el.scrollHeight;
+    }
+    _notifCounts.messages = Math.max(0, _notifCounts.messages - 1);
+    setBadge('messagesBadge', _notifCounts.messages);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '✉️ Enviar'; }
+  }
+};
 
 window.showMessages = async (packId) => {
   navigate('messages');

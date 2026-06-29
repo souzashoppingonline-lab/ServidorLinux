@@ -2222,6 +2222,42 @@ route('GET', '/api/questions', (req, res, sess) => {
   }
 });
 
+// Todas as lojas — para inbox unificada
+route('GET', '/api/questions/all', (req, res, sess) => {
+  const p      = qp(req);
+  const status = p.get('status') || 'UNANSWERED';
+  const limit  = Math.min(parseInt(p.get('limit') || '100'), 200);
+  const offset = parseInt(p.get('offset') || '0');
+  try {
+    const rows = db.prepare(`
+      SELECT q.*, s.nickname as store_name
+      FROM questions_sync q
+      JOIN stores s ON s.id = q.store_id
+      WHERE q.status = ?
+      ORDER BY q.date_created DESC
+      LIMIT ? OFFSET ?
+    `).all(status, limit, offset);
+    const total = db.prepare("SELECT COUNT(*) as n FROM questions_sync WHERE status=?").get(status).n;
+    ok(res, {
+      questions: rows.map(q => ({
+        id:         q.id,
+        text:       q.text,
+        status:     q.status,
+        date:       q.date_created,
+        item_id:    q.item_id,
+        item_title: q.item_title,
+        store_id:   q.store_id,
+        store_name: q.store_name,
+        from:       { nickname: q.buyer_nickname },
+        answer:     q.answer_text ? { text: q.answer_text, date: q.answer_date } : null,
+      })),
+      paging: { total, limit, offset },
+    });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
 route('POST', '/api/questions/answer', async (req, res, sess) => {
   const body = await readBody(req);
   const { question_id, text, storeId } = body;
@@ -2504,6 +2540,27 @@ route('GET', '/api/customers/detail', (req, res, sess) => {
 route('POST', '/api/customers/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_customers', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de clientes enfileirada' });
+});
+
+// Inbox: lista conversas recentes com última mensagem
+route('GET', '/api/messages/inbox', (req, res, sess) => {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        p.pack_id, p.store_id, p.order_id, p.buyer,
+        s.nickname as store_name,
+        (SELECT text FROM messages_cache mc WHERE mc.pack_id=p.pack_id ORDER BY mc.created_at DESC LIMIT 1) as last_text,
+        (SELECT created_at FROM messages_cache mc WHERE mc.pack_id=p.pack_id ORDER BY mc.created_at DESC LIMIT 1) as last_date,
+        (SELECT COUNT(*) FROM messages_cache mc WHERE mc.pack_id=p.pack_id) as msg_count
+      FROM packs_seen p
+      JOIN stores s ON s.id = p.store_id
+      ORDER BY last_date DESC
+      LIMIT 50
+    `).all();
+    ok(res, { conversations: rows });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
 });
 
 // ── Messages ───────────────────────────────────────────────
