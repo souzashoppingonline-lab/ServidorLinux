@@ -4265,7 +4265,8 @@ async function dispararAlertas(forceAll = false) {
   }
 
   // Respeita horário de silêncio (sempre em horário de Brasília, independente do TZ do servidor)
-  if (!forceAll) {
+  // quiet_start === quiet_end desativa o silêncio (nunca pula por horário)
+  if (!forceAll && cfg.quiet_start !== cfg.quiet_end) {
     const hora = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hour12: false }), 10);
     let emSilencio;
     if (cfg.quiet_start < cfg.quiet_end) emSilencio = hora >= cfg.quiet_start && hora < cfg.quiet_end;
