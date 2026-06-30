@@ -396,8 +396,9 @@ try {
   `);
 } catch {}
 
-// cancel_notified column
+// cancel_notified and pack_id columns
 try { db.exec("ALTER TABLE orders ADD COLUMN cancel_notified INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE orders ADD COLUMN pack_id TEXT DEFAULT ''"); } catch {}
 
 // Shipping address column on orders (migration)
 for (const col of [
@@ -728,7 +729,7 @@ const JOB_HANDLERS = {
       );
       if (!page?.results?.length) break;
 
-      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost,pack_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
       db.transaction((orders) => {
@@ -743,7 +744,8 @@ const JOB_HANDLERS = {
             addr.city?.name || addr.city || '',
             addr.state?.name || addr.state || '',
             addr.state?.id || addr.state_code || '',
-            sellerShipping, shippingId, 0, sellerShipping
+            sellerShipping, shippingId, 0, sellerShipping,
+            String(o.pack_id || '')
           );
           const orderId = String(o.id);
           deleteItems.run(orderId);
@@ -2576,17 +2578,18 @@ route('GET', '/api/messages/inbox', (req, res, sess) => {
       LIMIT 30
     `).all();
 
-    // Packs conhecidos mas sem mensagens no cache ainda
+    // Pedidos com pack_id mas sem mensagens no cache ainda
     const semCache = db.prepare(`
-      SELECT p.pack_id, p.store_id, p.order_id, p.buyer,
+      SELECT o.pack_id, o.store_id, o.id as order_id, o.buyer_nickname as buyer,
              s.nickname as store_name,
              NULL as last_date, NULL as last_text, 0 as msg_count
-      FROM packs_seen p
-      JOIN stores s ON s.id = p.store_id
-      WHERE p.pack_id NOT LIKE 'noPack:%'
-        AND p.pack_id NOT IN (SELECT DISTINCT pack_id FROM messages_cache)
-      ORDER BY p.synced_at DESC
-      LIMIT 20
+      FROM orders o
+      JOIN stores s ON s.id = o.store_id
+      WHERE o.pack_id != '' AND o.pack_id IS NOT NULL
+        AND o.pack_id NOT IN (SELECT DISTINCT pack_id FROM messages_cache)
+      GROUP BY o.pack_id
+      ORDER BY o.date_created DESC
+      LIMIT 30
     `).all();
 
     ok(res, { conversations: [...comCache, ...semCache] });
@@ -4470,28 +4473,21 @@ async function pollNewMessages() {
   const stores = db.prepare('SELECT * FROM stores').all();
   for (const store of stores) {
     try {
-      // Fase 1: descobrir novos packs para pedidos que ainda não têm pack_id registrado
-      // Limita a 5 pedidos novos por ciclo para não estourar rate limit
-      const ordensNovasSemPack = db.prepare(`
-        SELECT id, buyer_nickname FROM orders
-        WHERE store_id=? AND status='paid'
-          AND id NOT IN (SELECT order_id FROM packs_seen WHERE store_id=?)
-        ORDER BY date_created DESC LIMIT 5
+      // Usa pack_id salvo diretamente no orders (sem chamar /packs/by_order_id/)
+      // Popula packs_seen a partir dos pedidos que já têm pack_id no banco
+      const ordensComPack = db.prepare(`
+        SELECT id as order_id, buyer_nickname, pack_id FROM orders
+        WHERE store_id=? AND status='paid' AND pack_id != '' AND pack_id IS NOT NULL
+          AND pack_id NOT IN (SELECT pack_id FROM packs_seen WHERE store_id=?)
+        ORDER BY date_created DESC LIMIT 20
       `).all(store.id, store.id);
 
-      for (const order of ordensNovasSemPack) {
-        const packsData = await mlFetch(`/packs/by_order_id/${order.id}`, {}, store.id).catch(() => null);
-        if (!packsData?.id) {
-          // Marca com pack_id vazio para não tentar de novo
-          db.prepare('INSERT OR IGNORE INTO packs_seen(pack_id,store_id,order_id,buyer) VALUES(?,?,?,?)')
-            .run(`noPack:${order.id}`, store.id, order.id, order.buyer_nickname || '');
-          continue;
-        }
+      for (const o of ordensComPack) {
         db.prepare('INSERT OR IGNORE INTO packs_seen(pack_id,store_id,order_id,buyer) VALUES(?,?,?,?)')
-          .run(String(packsData.id), store.id, order.id, order.buyer_nickname || '');
+          .run(o.pack_id, store.id, o.order_id, o.buyer_nickname || '');
       }
 
-      // Fase 2: checar mensagens novas em packs já conhecidos (últimos 20 packs com pack_id válido)
+      // Checar mensagens novas em packs conhecidos (últimos 20 com pack_id válido)
       const packsConhecidos = db.prepare(`
         SELECT pack_id, order_id, buyer FROM packs_seen
         WHERE store_id=? AND pack_id NOT LIKE 'noPack:%'
