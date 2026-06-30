@@ -4055,6 +4055,77 @@ async function renderMonitor() {
       </div>
     </div>
 
+    <!-- SAÚDE DO SERVIDOR -->
+    ${(() => {
+      const srv = status.servidor || {};
+      const semaforo = (pct) => pct == null ? '#888' : pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#22c55e';
+      const barra = (pct, cor) => `
+        <div style="background:#1a1a1a;border-radius:6px;height:6px;margin-top:8px;overflow:hidden">
+          <div style="width:${Math.min(100, pct||0)}%;height:100%;background:${cor};transition:width .3s"></div>
+        </div>`;
+      const discoPct = srv.disco ? parseInt(srv.disco.pcent) : null;
+      const cpuPct   = srv.cpu ? srv.cpu.pct : null;
+      const memPct   = srv.mem ? srv.mem.pct : null;
+      const banidos  = srv.sshBanidos;
+      return `
+      <div style="font-weight:700;margin:4px 0 12px;font-size:15px">🩺 Saúde do Servidor</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:24px">
+
+        <div class="card" style="border-left:4px solid ${semaforo(discoPct)}">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">💾 DISCO</div>
+          ${srv.disco ? `
+            <div style="font-size:22px;font-weight:700;color:${semaforo(discoPct)}">${srv.disco.pcent}</div>
+            <div style="font-size:12px;color:#888">${srv.disco.used} usado de ${srv.disco.size}</div>
+            <div style="font-size:12px;color:#888">${srv.disco.avail} livre</div>
+            ${barra(discoPct, semaforo(discoPct))}
+          ` : `<div style="font-size:12px;color:#888">Indisponível</div>`}
+        </div>
+
+        <div class="card" style="border-left:4px solid ${semaforo(cpuPct)}">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">🔧 CPU</div>
+          ${srv.cpu ? `
+            <div style="font-size:22px;font-weight:700;color:${semaforo(cpuPct)}">${srv.cpu.pct}%</div>
+            <div style="font-size:12px;color:#888">load ${srv.cpu.load1} • ${srv.cpu.cores} núcleos</div>
+            ${barra(cpuPct, semaforo(cpuPct))}
+          ` : `<div style="font-size:12px;color:#888">Indisponível</div>`}
+        </div>
+
+        <div class="card" style="border-left:4px solid ${semaforo(memPct)}">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">🧠 MEMÓRIA</div>
+          ${srv.mem ? `
+            <div style="font-size:22px;font-weight:700;color:${semaforo(memPct)}">${srv.mem.pct}%</div>
+            <div style="font-size:12px;color:#888">${srv.mem.usadoGB}GB de ${srv.mem.totalGB}GB</div>
+            ${barra(memPct, semaforo(memPct))}
+          ` : `<div style="font-size:12px;color:#888">Indisponível</div>`}
+        </div>
+
+        <div class="card" style="border-left:4px solid #3b82f6">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">📶 REDE</div>
+          ${srv.rede ? `
+            <div style="font-size:14px">⬇️ <b>${srv.rede.downKbps}</b> KB/s</div>
+            <div style="font-size:14px">⬆️ <b>${srv.rede.upKbps}</b> KB/s</div>
+          ` : `<div style="font-size:12px;color:#888">Calculando... (atualize de novo)</div>`}
+        </div>
+
+        <div class="card" style="border-left:4px solid #a855f7">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">🔌 CONEXÕES ATIVAS</div>
+          <div style="font-size:22px;font-weight:700">${(srv.conexoes||[]).length}</div>
+          ${(srv.conexoes||[]).length > 0
+            ? `<div style="font-size:11px;color:#888;max-height:60px;overflow-y:auto;line-height:1.5">${srv.conexoes.slice(0,15).map(ip=>`<div>${ip}</div>`).join('')}</div>`
+            : `<div style="font-size:12px;color:#888">Nenhuma conexão no momento</div>`}
+        </div>
+
+        <div class="card" style="border-left:4px solid ${banidos && banidos.atual > 0 ? '#ef4444' : '#22c55e'}">
+          <div style="font-size:11px;color:#888;margin-bottom:4px">🚫 SSH BANIDOS</div>
+          ${banidos ? `
+            <div style="font-size:22px;font-weight:700;color:${banidos.atual > 0 ? '#ef4444' : '#22c55e'}">${banidos.atual}</div>
+            <div style="font-size:12px;color:#888">ativos agora • ${banidos.total} no total</div>
+          ` : `<div style="font-size:12px;color:#888">fail2ban indisponível</div>`}
+        </div>
+
+      </div>`;
+    })()}
+
     <!-- VENDAS HOJE -->
     <div class="card" style="margin-bottom:20px">
       <div style="font-weight:600;margin-bottom:12px">🛒 Vendas hoje por loja</div>

@@ -4491,6 +4491,7 @@ route('GET', '/api/monitor/status', (req, res, sess) => {
       pid: process.pid,
     };
     s.last_alert_sent = monitorGet('last_alert_sent', null);
+    s.servidor = coletarStatusServidor();
     ok(res, s);
   } catch (e) {
     apiErr(res, 500, e.message);
