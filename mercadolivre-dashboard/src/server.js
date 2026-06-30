@@ -3,6 +3,8 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const { execSync } = require('child_process');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
@@ -4140,6 +4142,7 @@ const MONITOR_DEFAULTS = {
   alert_cancelamentos: true,
   alert_anuncios:      true,
   alert_pedido_novo:   true,
+  alert_servidor:      true,
   meta_diaria:         0,
   threshold_estoque_dias: 7,
   threshold_erros:  3,
@@ -4206,6 +4209,83 @@ function coletarStatus() {
   const errosHora = db.prepare("SELECT COUNT(*) as n FROM job_queue WHERE status='failed' AND completed_at>=unixepoch()-3600").get().n;
 
   return { vendas, estoqueCritico, scheduler, errosHora, gerado_em: new Date().toISOString() };
+}
+
+// Coleta snapshot de saúde do servidor (disco, CPU, memória, rede, conexões, SSH banidos)
+let _netPrev = null;
+function coletarStatusServidor() {
+  const result = { disco: null, cpu: null, mem: null, rede: null, conexoes: [], sshBanidos: null };
+
+  try {
+    const out = execSync("df -h / --output=size,used,avail,pcent | tail -1", { encoding: 'utf8' }).trim();
+    const [size, used, avail, pcent] = out.split(/\s+/);
+    result.disco = { size, used, avail, pcent };
+  } catch {}
+
+  try {
+    const load = os.loadavg();
+    const cores = os.cpus().length || 1;
+    result.cpu = { load1: load[0].toFixed(2), cores, pct: Math.min(100, Math.round((load[0] / cores) * 100)) };
+  } catch {}
+
+  try {
+    const total = os.totalmem(), free = os.freemem();
+    const usado = total - free;
+    result.mem = {
+      usadoGB: (usado / 1024 / 1024 / 1024).toFixed(1),
+      totalGB: (total / 1024 / 1024 / 1024).toFixed(1),
+      pct: Math.round((usado / total) * 100),
+    };
+  } catch {}
+
+  try {
+    const dev = fs.readFileSync('/proc/net/dev', 'utf8');
+    let rx = 0, tx = 0;
+    dev.split('\n').slice(2).forEach(line => {
+      const parts = line.trim().split(/\s+/);
+      const iface = (parts[0] || '').replace(':', '');
+      if (!iface || iface === 'lo') return;
+      rx += parseInt(parts[1] || '0', 10);
+      tx += parseInt(parts[9] || '0', 10);
+    });
+    const now = Date.now();
+    if (_netPrev) {
+      const deltaSec = (now - _netPrev.ts) / 1000;
+      if (deltaSec > 0) {
+        result.rede = {
+          downKbps: ((rx - _netPrev.rx) / 1024 / deltaSec).toFixed(1),
+          upKbps: ((tx - _netPrev.tx) / 1024 / deltaSec).toFixed(1),
+        };
+      }
+    }
+    _netPrev = { rx, tx, ts: now };
+  } catch {}
+
+  try {
+    const out = execSync(`ss -tn state established 2>/dev/null | tail -n +2`, { encoding: 'utf8' }).trim();
+    const ips = new Set();
+    out.split('\n').filter(Boolean).forEach(line => {
+      const parts = line.trim().split(/\s+/);
+      const peer = parts[4] || '';
+      const ip = peer.replace(/:[0-9]+$/, '').replace(/^\[|\]$/g, '');
+      if (ip && ip !== '127.0.0.1' && ip !== '::1') ips.add(ip);
+    });
+    result.conexoes = Array.from(ips);
+  } catch {}
+
+  try {
+    const out = execSync("fail2ban-client status sshd 2>/dev/null", { encoding: 'utf8' });
+    const totalMatch = out.match(/Total banned:\s*(\d+)/);
+    const currentMatch = out.match(/Currently banned:\s*(\d+)/);
+    const listMatch = out.match(/Banned IP list:\s*(.*)/);
+    result.sshBanidos = {
+      total: totalMatch ? parseInt(totalMatch[1], 10) : 0,
+      atual: currentMatch ? parseInt(currentMatch[1], 10) : 0,
+      ips: listMatch ? listMatch[1].trim().split(/\s+/).filter(Boolean) : [],
+    };
+  } catch {}
+
+  return result;
 }
 
 // Envia mensagem Telegram
@@ -4332,6 +4412,25 @@ async function dispararAlertas(forceAll = false) {
     const m = Math.floor((uptime % 3600) / 60);
     const mem = Math.round(process.memoryUsage().rss / 1024 / 1024);
     linhas.push(`🖥️ <b>Processo:</b> Ativo há ${h}h${m}m | Memória: ${mem} MB`);
+  }
+
+  // Saúde do servidor (disco, CPU, rede, conexões, SSH banidos)
+  if (cfg.alert_servidor) {
+    const srv = coletarStatusServidor();
+    linhas.push('');
+    linhas.push('🖥️ <b>Servidor:</b>');
+    if (srv.disco) linhas.push(`  💾 Disco: ${srv.disco.used}/${srv.disco.size} usado (${srv.disco.pcent}) — livre: ${srv.disco.avail}`);
+    if (srv.cpu) linhas.push(`  🔧 CPU: ${srv.cpu.pct}% (load ${srv.cpu.load1}, ${srv.cpu.cores} núcleos)`);
+    if (srv.mem) linhas.push(`  🧠 Memória: ${srv.mem.usadoGB}GB/${srv.mem.totalGB}GB (${srv.mem.pct}%)`);
+    if (srv.rede) linhas.push(`  📶 Rede: ⬇️ ${srv.rede.downKbps} KB/s | ⬆️ ${srv.rede.upKbps} KB/s`);
+    linhas.push(srv.conexoes.length > 0
+      ? `  🔌 IPs conectados agora (${srv.conexoes.length}): ${srv.conexoes.slice(0, 10).join(', ')}`
+      : '  🔌 Nenhuma conexão ativa no momento');
+    if (srv.sshBanidos) {
+      linhas.push(`  🚫 SSH banidos: ${srv.sshBanidos.atual} ativos / ${srv.sshBanidos.total} no total`);
+    } else {
+      linhas.push('  🚫 SSH banidos: fail2ban não disponível/configurado');
+    }
   }
 
   const texto = linhas.join('\n');

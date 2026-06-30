@@ -4152,6 +4152,7 @@ async function renderMonitor() {
         ${toggle('alert_pedido_novo',  '🛒 Novo pedido pago',           'Alerta instantâneo no Telegram a cada pedido pago')}
         ${toggle('alert_cancelamentos','Cancelamentos',                 'Alerta quando um pedido for cancelado')}
         ${toggle('alert_anuncios',     'Anúncios pausados/sem estoque', 'Alerta quando anúncio for pausado ou zerar estoque')}
+        ${toggle('alert_servidor',     '🖥️ Saúde do servidor',          'Disco, CPU, memória, rede, IPs conectados e SSH banidos')}
         <div style="margin-top:12px">
           <label style="font-size:12px;color:#888">Estoque crítico: alertar com menos de quantos dias?</label>
           <input id="tg_est_dias" type="number" min="1" max="30" value="${cfg.threshold_estoque_dias || 7}"
@@ -4211,6 +4212,7 @@ window.monitorSave = async function() {
     alert_pedido_novo:    document.getElementById('tog_alert_pedido_novo')?.checked    || false,
     alert_cancelamentos:  document.getElementById('tog_alert_cancelamentos')?.checked  || false,
     alert_anuncios:       document.getElementById('tog_alert_anuncios')?.checked       || false,
+    alert_servidor:       document.getElementById('tog_alert_servidor')?.checked       || false,
     meta_diaria:          parseFloat(document.getElementById('meta_diaria')?.value     || 0),
   };
   try {
