@@ -409,6 +409,12 @@ for (const col of [
   "ALTER TABLE orders ADD COLUMN receiver_state_code TEXT DEFAULT ''",
 ]) { try { db.exec(col); } catch {} }
 
+// Saúde/qualidade do anúncio (visibilidade na busca)
+for (const col of [
+  "ALTER TABLE listings ADD COLUMN health REAL DEFAULT NULL",
+  "ALTER TABLE listings ADD COLUMN sub_status TEXT DEFAULT ''",
+]) { try { db.exec(col); } catch {} }
+
 // Ads tables
 try {
   db.exec(`
@@ -672,30 +678,32 @@ async function processItemBatch(storeId, ids) {
   if (!ids.length) return;
   const chunk = ids.join(',');
   const batch = await mlFetch(
-    `/items?ids=${chunk}&attributes=id,title,price,original_price,available_quantity,sold_quantity,thumbnail,status,permalink,condition,listing_type_id,category_id,deal_ids`,
+    `/items?ids=${chunk}&attributes=id,title,price,original_price,available_quantity,sold_quantity,thumbnail,status,sub_status,permalink,condition,listing_type_id,category_id,deal_ids,health`,
     {}, storeId
   ).catch(() => null);
   if (!batch) return;
 
   // Log first item to verify original_price is returned by ML batch API
   const sample = Array.isArray(batch) ? (batch[0]?.body || batch[0]) : null;
-  if (sample) console.log(`[listings_batch] sample id=${sample.id} price=${sample.price} original_price=${sample.original_price} deal_ids=${JSON.stringify(sample.deal_ids)}`);
+  if (sample) console.log(`[listings_batch] sample id=${sample.id} price=${sample.price} original_price=${sample.original_price} deal_ids=${JSON.stringify(sample.deal_ids)} health=${sample.health}`);
 
   const insert = db.prepare(`
     INSERT OR REPLACE INTO listings
-      (id,store_id,title,price,original_price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id,deal_ids)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      (id,store_id,title,price,original_price,available_quantity,sold_quantity,status,thumbnail,permalink,condition,listing_type_id,category_id,deal_ids,health,sub_status)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `);
   db.transaction((items) => {
     for (const d of items) {
       const it = d.body || d;
       if (!it?.id) continue;
       const dealIds = Array.isArray(it.deal_ids) ? it.deal_ids.join(',') : (it.deal_ids || '');
+      const subStatus = Array.isArray(it.sub_status) ? it.sub_status.join(',') : (it.sub_status || '');
       insert.run(
         it.id, storeId, it.title||'', it.price||0, it.original_price||0,
         it.available_quantity||0, it.sold_quantity||0, it.status||'active',
         it.thumbnail||'', it.permalink||'', it.condition||'',
-        it.listing_type_id||'', it.category_id||'', dealIds
+        it.listing_type_id||'', it.category_id||'', dealIds,
+        it.health != null ? it.health : null, subStatus
       );
     }
   })(batch);
@@ -2184,7 +2192,12 @@ route('GET', '/api/listings', (req, res, sess) => {
       promotions: promoItemsMap[item.id] || [],
     }));
 
-    ok(res, { items: enriched, total, limit, offset });
+    const healthAgg = db.prepare(`
+      SELECT AVG(health) AS media, COUNT(*) FILTER (WHERE health IS NOT NULL AND health < 0.5) AS baixa
+      FROM listings WHERE store_id=? AND status=? AND health IS NOT NULL
+    `).get(storeId, status);
+
+    ok(res, { items: enriched, total, limit, offset, health_media: healthAgg?.media ?? null, health_baixa: healthAgg?.baixa || 0 });
   } catch (e) {
     apiErr(res, 500, e.message);
   }

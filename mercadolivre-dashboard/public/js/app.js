@@ -702,7 +702,21 @@ async function loadListings() {
       return;
     }
 
+    const healthBanner = data.health_media != null ? `
+      <div class="card" style="margin-bottom:14px;display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:11px;color:var(--text-2);text-transform:uppercase;font-weight:700">Visibilidade média dos anúncios</div>
+          <div style="font-size:22px;font-weight:800;color:${data.health_media >= 0.8 ? '#22c55e' : data.health_media >= 0.5 ? '#f59e0b' : '#ef4444'}">${Math.round(data.health_media * 100)}%</div>
+        </div>
+        ${data.health_baixa > 0 ? `
+        <div>
+          <div style="font-size:11px;color:var(--text-2);text-transform:uppercase;font-weight:700">Baixa visibilidade (&lt;50%)</div>
+          <div style="font-size:22px;font-weight:800;color:#ef4444">${data.health_baixa} anúncio${data.health_baixa !== 1 ? 's' : ''}</div>
+        </div>` : ''}
+      </div>` : '';
+
     wrap.innerHTML = `
+      ${healthBanner}
       <div class="listing-grid">
         ${data.items.map(item => listingCard(item)).join('')}
       </div>
@@ -723,6 +737,18 @@ function listingCard(item) {
     ? `<span class="promo-badge" title="${promoName || 'Em promoção'}">🏷️ ${discPct > 0 ? `-${discPct}%` : 'Promo'}</span>`
     : '';
 
+  const healthPct  = item.health != null ? Math.round(item.health * 100) : null;
+  const healthCor  = healthPct == null ? '#888' : healthPct >= 80 ? '#22c55e' : healthPct >= 50 ? '#f59e0b' : '#ef4444';
+  const healthTag  = healthPct != null
+    ? `<span title="Qualidade do anúncio (visibilidade na busca do ML)" style="display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;color:${healthCor}">
+         <span style="width:7px;height:7px;border-radius:50%;background:${healthCor};display:inline-block"></span>
+         Visibilidade ${healthPct}%
+       </span>`
+    : '';
+  const subStatusTag = item.sub_status
+    ? `<span style="color:#ef4444;font-size:11px;font-weight:600" title="Motivo: ${item.sub_status}">⚠️ ${item.sub_status}</span>`
+    : '';
+
   const precoHtml = origPrice
     ? `<div class="listing-stat-val">${fmt.brl(item.price)}</div>
        <div style="font-size:11px;color:#9ca3af;text-decoration:line-through">${fmt.brl(origPrice)}</div>
@@ -740,6 +766,8 @@ function listingCard(item) {
         <div class="listing-meta">
           <span>${badge(STATUS_LISTING, item.status)}</span>
           ${promoTag}
+          ${healthTag}
+          ${subStatusTag}
           <span style="color:var(--text-3)">ID: ${item.id}</span>
           ${item.permalink ? `<a href="${item.permalink}" target="_blank" style="color:var(--blue);font-size:12px">Ver no ML ↗</a>` : ''}
         </div>
