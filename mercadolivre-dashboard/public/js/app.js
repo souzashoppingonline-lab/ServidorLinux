@@ -418,7 +418,7 @@ async function renderDashboard() {
       <div class="kpi-grid">
         ${kpiCard('Receita 30 dias', fmt.brl(kpis.revenue30d), 'Período atual', '💰', '#FFE600')}
         ${kpiCard('Hoje', fmt.brl(kpis.revenueToday), 'Faturamento do dia', '📅', '#10b981')}
-        ${kpiCard('Pedidos 30d', fmt.num(kpis.orders30d), `${fmt.num(kpis.ordersToday)} hoje`, '🛒', '#3b82f6')}
+        ${kpiCardToday(kpis.ordersToday, kpis.unitsToday || 0)}
         ${kpiCard('Ticket Médio', fmt.brl(kpis.avgTicket), 'Últimos 30 dias', '📊', '#8b5cf6')}
         ${kpiCard('Anúncios Ativos', fmt.num(kpis.activeListings), `${fmt.num(kpis.pausedListings)} pausados`, '📦', '#f59e0b')}
         ${kpiCard('Perguntas Pendentes', fmt.num(kpis.pendingQuestions), 'Aguardando resposta', '❓', kpis.pendingQuestions > 0 ? '#ef4444' : '#10b981')}
@@ -537,6 +537,21 @@ function kpiCard(label, value, sub, icon, color) {
       <div class="kpi-label">${label}</div>
       <div class="kpi-value">${value}</div>
       <div class="kpi-sub">${sub}</div>
+    </div>
+  `;
+}
+
+function kpiCardToday(orders, units) {
+  return `
+    <div class="kpi-card" style="--kpi-color:#10b981;background:linear-gradient(135deg,rgba(16,185,129,.18) 0%,rgba(16,185,129,.06) 100%);border:1.5px solid rgba(16,185,129,.4)">
+      <div class="kpi-icon">🛒</div>
+      <div class="kpi-label">Pedidos Hoje</div>
+      <div class="kpi-value" style="color:#10b981">${fmt.num(orders)}</div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px">
+        <span style="background:rgba(16,185,129,.2);color:#10b981;border-radius:20px;padding:2px 10px;font-size:12px;font-weight:700">
+          📦 ${fmt.num(units)} unid.
+        </span>
+      </div>
     </div>
   `;
 }

@@ -2031,6 +2031,9 @@ route('GET', '/api/dashboard', (req, res, sess) => {
 
     const todayOrders = orders30.filter(o => o.date_created && o.date_created.startsWith(todayStr));
     const revenueToday = todayOrders.reduce((s, o) => s + (o.total_amount || 0), 0);
+    const unitsToday   = db.prepare(
+      "SELECT COALESCE(SUM(oi.quantity),0) as n FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE o.store_id=? AND o.status='paid' AND date(o.date_created)=date('now','localtime')"
+    ).get(storeId)?.n || 0;
 
     const activeListings  = db.prepare("SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status='active'").get(storeId)?.n || 0;
     const pausedListings  = db.prepare("SELECT COUNT(*) as n FROM listings WHERE store_id=? AND status='paused'").get(storeId)?.n || 0;
@@ -2059,6 +2062,7 @@ route('GET', '/api/dashboard', (req, res, sess) => {
         pausedListings,
         orders30d: totalOrders30,
         ordersToday: todayOrders.length,
+        unitsToday,
         revenue30d,
         revenueToday,
         avgTicket,
