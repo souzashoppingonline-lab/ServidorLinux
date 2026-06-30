@@ -3437,9 +3437,51 @@ async function vtLoad() {
       ...(VT.dateTo      ? { dateTo:     VT.dateTo      } : {}),
     });
     const data = await API.get(`/api/vendas-totais?${qs}`);
-    const { vendas, totals, paging } = data;
+    const { vendas, totals, paging, comparativo } = data;
 
     const M = fmt.brl;
+
+    // ── Comparativo hoje vs ontem (mesmo horário) ───────────────
+    let compHtml = '';
+    if (comparativo) {
+      const c = comparativo;
+      const varFat = c.variacao_faturamento_pct;
+      const varPed = c.variacao_pedidos_pct;
+      const corVar = (v) => v > 0 ? '#10b981' : v < 0 ? '#ef4444' : '#888';
+      const setaVar = (v) => v > 0 ? '▲' : v < 0 ? '▼' : '■';
+      compHtml = `
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+          <div style="font-size:13px;font-weight:700;color:var(--text-1)">📊 Hoje vs. Ontem (até ${c.hora_referencia})</div>
+          <div style="font-size:11px;color:var(--text-2)">comparando o mesmo horário do dia anterior</div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+          <div>
+            <div style="font-size:10px;color:var(--text-2);text-transform:uppercase">Faturamento hoje</div>
+            <div style="font-size:18px;font-weight:800;color:var(--text-1)">${M(c.hoje.faturamento)}</div>
+            <div style="font-size:11px;color:var(--text-2)">ontem: ${M(c.ontem.faturamento)}</div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--text-2);text-transform:uppercase">Variação faturamento</div>
+            <div style="font-size:18px;font-weight:800;color:${corVar(varFat)}">${setaVar(varFat)} ${Math.abs(varFat).toFixed(1)}%</div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--text-2);text-transform:uppercase">Pedidos hoje</div>
+            <div style="font-size:18px;font-weight:800;color:var(--text-1)">${fmt.num(c.hoje.pedidos)}</div>
+            <div style="font-size:11px;color:var(--text-2)">ontem: ${fmt.num(c.ontem.pedidos)}</div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--text-2);text-transform:uppercase">Variação pedidos</div>
+            <div style="font-size:18px;font-weight:800;color:${corVar(varPed)}">${setaVar(varPed)} ${Math.abs(varPed).toFixed(1)}%</div>
+          </div>
+          <div>
+            <div style="font-size:10px;color:var(--text-2);text-transform:uppercase">Unidades hoje</div>
+            <div style="font-size:18px;font-weight:800;color:var(--text-1)">${fmt.num(c.hoje.unidades)}</div>
+            <div style="font-size:11px;color:var(--text-2)">ontem: ${fmt.num(c.ontem.unidades)}</div>
+          </div>
+        </div>
+      </div>`;
+    }
 
     // ── Summary cards ────────────────────────────────────────
     const mc_color = totals.mc_pct >= 20 ? '#10b981' : totals.mc_pct >= 0 ? '#f59e0b' : '#ef4444';
@@ -3554,7 +3596,7 @@ async function vtLoad() {
       </div>
     ` : `<div style="font-size:12px;color:var(--text-2);text-align:center;margin-top:8px">${paging.total} registro${paging.total !== 1 ? 's' : ''}</div>`;
 
-    wrap.innerHTML = cardsHtml + `
+    wrap.innerHTML = compHtml + cardsHtml + `
       <div class="card" style="overflow-x:auto;padding:0">
         <table style="width:100%;border-collapse:collapse;font-size:11px">
           <thead>
@@ -4617,3 +4659,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   init();
 });
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}

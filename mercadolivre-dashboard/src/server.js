@@ -1887,6 +1887,37 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     unidades:          totRow.unidades_total || 0,
   };
 
+  // Comparativo: vendas de hoje (até agora) vs. vendas de ontem no mesmo horário
+  // Usa deslocamento fixo de -3h (Brasília) a partir do UTC, em vez de 'localtime' do SO
+  // (o servidor roda em UTC — 'localtime' daria o horário errado, mesmo bug já corrigido nos alertas do Telegram)
+  const compStoreWhere = storeFilter ? 'AND o.store_id = ?' : '';
+  const compParams = storeFilter ? [storeFilter] : [];
+  const hojeRow = db.prepare(`
+    SELECT COUNT(DISTINCT o.id) AS pedidos, SUM(oi.unit_price * oi.quantity) AS faturamento, SUM(oi.quantity) AS unidades
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status = 'paid' ${compStoreWhere}
+      AND date(o.date_created, '-3 hours') = date('now', '-3 hours')
+      AND time(o.date_created, '-3 hours') <= time('now', '-3 hours')
+  `).get(...compParams);
+  const ontemRow = db.prepare(`
+    SELECT COUNT(DISTINCT o.id) AS pedidos, SUM(oi.unit_price * oi.quantity) AS faturamento, SUM(oi.quantity) AS unidades
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE o.status = 'paid' ${compStoreWhere}
+      AND date(o.date_created, '-3 hours') = date('now', '-1 day', '-3 hours')
+      AND time(o.date_created, '-3 hours') <= time('now', '-3 hours')
+  `).get(...compParams);
+
+  const variacaoPct = (atual, anterior) => anterior > 0 ? ((atual - anterior) / anterior) * 100 : (atual > 0 ? 100 : 0);
+  const comparativo = {
+    hoje:  { pedidos: hojeRow.pedidos || 0,  faturamento: hojeRow.faturamento || 0,  unidades: hojeRow.unidades || 0 },
+    ontem: { pedidos: ontemRow.pedidos || 0, faturamento: ontemRow.faturamento || 0, unidades: ontemRow.unidades || 0 },
+    variacao_faturamento_pct: variacaoPct(hojeRow.faturamento || 0, ontemRow.faturamento || 0),
+    variacao_pedidos_pct:     variacaoPct(hojeRow.pedidos || 0, ontemRow.pedidos || 0),
+    hora_referencia: new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' }),
+  };
+
   const vendas = rows.map(r => {
     const fat      = r.faturamento  || 0;
     const custo    = r.oc_cost      || 0;
@@ -1928,7 +1959,7 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     };
   });
 
-  ok(res, { vendas, totals, paging: { total, limit, offset } });
+  ok(res, { vendas, totals, comparativo, paging: { total, limit, offset } });
 });
 
 route('PUT', '/api/vendas-totais/cost', async (req, res, sess) => {
