@@ -4255,16 +4255,24 @@ async function dispararAlertas(forceAll = false) {
   const cfg = {};
   Object.keys(MONITOR_DEFAULTS).forEach(k => { cfg[k] = monitorGet(k, MONITOR_DEFAULTS[k]); });
 
-  if (!cfg.enabled && !forceAll) return;
-  if (!cfg.telegram_token || !cfg.telegram_chat_id) return;
+  if (!cfg.enabled && !forceAll) {
+    console.log('[monitor] Alerta periódico pulado: monitor desativado (enabled=false)');
+    return;
+  }
+  if (!cfg.telegram_token || !cfg.telegram_chat_id) {
+    console.log('[monitor] Alerta periódico pulado: telegram_token ou telegram_chat_id não configurados');
+    return;
+  }
 
-  // Respeita horário de silêncio
+  // Respeita horário de silêncio (sempre em horário de Brasília, independente do TZ do servidor)
   if (!forceAll) {
-    const hora = new Date().getHours();
-    if (cfg.quiet_start < cfg.quiet_end) {
-      if (hora >= cfg.quiet_start && hora < cfg.quiet_end) return;
-    } else {
-      if (hora >= cfg.quiet_start || hora < cfg.quiet_end) return;
+    const hora = parseInt(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo', hour: '2-digit', hour12: false }), 10);
+    let emSilencio;
+    if (cfg.quiet_start < cfg.quiet_end) emSilencio = hora >= cfg.quiet_start && hora < cfg.quiet_end;
+    else emSilencio = hora >= cfg.quiet_start || hora < cfg.quiet_end;
+    if (emSilencio) {
+      console.log(`[monitor] Alerta periódico pulado: horário de silêncio (hora BR=${hora}, quiet=${cfg.quiet_start}-${cfg.quiet_end})`);
+      return;
     }
   }
 
