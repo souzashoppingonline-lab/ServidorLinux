@@ -3459,6 +3459,16 @@ async function vtLoad() {
           <div style="margin-top:4px;font-size:11px;font-weight:700;color:${mc_color}">(${totals.mc_pct.toFixed(2)}%)</div>
         </div>
 
+        <div style="background:linear-gradient(135deg,rgba(16,185,129,.18) 0%,rgba(16,185,129,.06) 100%);border:1.5px solid rgba(16,185,129,.45);border-radius:10px;padding:12px 14px;border-left:4px solid #10b981">
+          <div style="font-size:10px;font-weight:700;color:#10b981;text-transform:uppercase;margin-bottom:6px">🛒 Pedidos no Período</div>
+          <div style="font-size:26px;font-weight:900;color:#10b981;line-height:1">${fmt.num(totals.pedidos)}</div>
+          <div style="margin-top:8px">
+            <span style="background:rgba(16,185,129,.2);color:#10b981;border-radius:20px;padding:3px 12px;font-size:12px;font-weight:700;display:inline-block">
+              📦 ${fmt.num(totals.unidades)} unidades
+            </span>
+          </div>
+        </div>
+
       </div>
     `;
 

@@ -1820,6 +1820,8 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
       SUM(COALESCE(oi.sale_fee, 0)) AS tarifa_total,
       SUM(COALESCE(o.buyer_shipping_cost, o.shipping_cost, 0)) AS frete_c_total,
       SUM(COALESCE(o.seller_shipping_cost, 0)) AS frete_v_total,
+      SUM(oi.quantity) AS unidades_total,
+      COUNT(DISTINCT o.id) AS pedidos_total,
       COUNT(*) AS qty
     FROM order_items oi
     JOIN orders o  ON o.id = oi.order_id
@@ -1857,6 +1859,8 @@ route('GET', '/api/vendas-totais', (req, res, sess) => {
     margem:            margem_t,
     mc_pct:            mc_pct_t,
     count:             totRow.qty || 0,
+    pedidos:           totRow.pedidos_total || 0,
+    unidades:          totRow.unidades_total || 0,
   };
 
   const vendas = rows.map(r => {
