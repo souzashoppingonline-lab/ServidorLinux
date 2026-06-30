@@ -465,6 +465,38 @@ try {
       synced_at              INTEGER DEFAULT (unixepoch()),
       PRIMARY KEY (date, ad_id, store_id)
     );
+
+    CREATE TABLE IF NOT EXISTS competitors (
+      item_id             TEXT NOT NULL,
+      store_id            TEXT NOT NULL,
+      label               TEXT DEFAULT '',
+      status              TEXT DEFAULT 'active',
+      title               TEXT DEFAULT '',
+      price               REAL DEFAULT 0,
+      original_price      REAL DEFAULT 0,
+      available_quantity  INTEGER DEFAULT 0,
+      sold_quantity       INTEGER DEFAULT 0,
+      listing_status      TEXT DEFAULT '',
+      thumbnail           TEXT DEFAULT '',
+      permalink           TEXT DEFAULT '',
+      seller_nickname     TEXT DEFAULT '',
+      last_error          TEXT DEFAULT '',
+      added_at            INTEGER DEFAULT (unixepoch()),
+      last_checked_at     INTEGER DEFAULT 0,
+      PRIMARY KEY (item_id, store_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS competitor_history (
+      id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id             TEXT NOT NULL,
+      store_id            TEXT NOT NULL,
+      price               REAL DEFAULT 0,
+      available_quantity  INTEGER DEFAULT 0,
+      sold_quantity       INTEGER DEFAULT 0,
+      listing_status      TEXT DEFAULT '',
+      checked_at          INTEGER DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_competitor_history_item ON competitor_history(item_id, store_id, checked_at);
   `);
 } catch {}
 
@@ -2452,6 +2484,106 @@ route('GET', '/api/promotions', (req, res, sess) => {
 route('POST', '/api/promotions/sync', (req, res, sess) => {
   Scheduler.enqueue('sync_promotions', sess.store_id, 2);
   ok(res, { ok: true, message: 'Sync de promoções enfileirada' });
+});
+
+// ── Concorrentes (monitoramento de anúncios públicos de terceiros) ─────────
+route('GET', '/api/competitors', (req, res, sess) => {
+  const storeId = qp(req).get('storeId') || sess.store_id;
+  try {
+    const items = db.prepare('SELECT * FROM competitors WHERE store_id=? ORDER BY added_at DESC').all(storeId);
+    ok(res, { items, total: items.length });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('GET', '/api/competitors/history', (req, res, sess) => {
+  const p       = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  const itemId  = p.get('itemId');
+  if (!itemId) { apiErr(res, 400, 'itemId obrigatório'); return; }
+  try {
+    const history = db.prepare(`
+      SELECT price, available_quantity, sold_quantity, listing_status, checked_at
+      FROM competitor_history WHERE item_id=? AND store_id=? ORDER BY checked_at ASC LIMIT 500
+    `).all(itemId, storeId);
+    ok(res, { history });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('POST', '/api/competitors', async (req, res, sess) => {
+  const body    = await readBody(req);
+  const storeId = body.storeId || sess.store_id;
+  const itemId  = String(body.item_id || '').trim().toUpperCase();
+  if (!itemId) { apiErr(res, 400, 'item_id obrigatório (ex: MLB1234567890)'); return; }
+
+  try {
+    const existing = db.prepare('SELECT item_id FROM competitors WHERE item_id=? AND store_id=?').get(itemId, storeId);
+    if (existing) { apiErr(res, 409, 'Esse anúncio já está sendo monitorado'); return; }
+
+    // Endpoint público — não precisa do token da loja para ver anúncio de terceiro
+    const item = await mlFetch(`/items/${itemId}`, {}, null);
+
+    const thumb = item.thumbnail || item.secure_thumbnail || '';
+    db.prepare(`
+      INSERT INTO competitors(item_id, store_id, label, status, title, price, original_price,
+                               available_quantity, sold_quantity, listing_status, thumbnail, permalink,
+                               seller_nickname, last_error, added_at, last_checked_at)
+      VALUES(?,?,?,'active',?,?,?,?,?,?,?,?,?,'',unixepoch(),unixepoch())
+    `).run(
+      itemId, storeId, body.label || '', item.title || '', item.price || 0, item.original_price || 0,
+      item.available_quantity || 0, item.sold_quantity || 0, item.status || '', thumb, item.permalink || '',
+      String(item.seller_id || '')
+    );
+    db.prepare(`
+      INSERT INTO competitor_history(item_id, store_id, price, available_quantity, sold_quantity, listing_status)
+      VALUES(?,?,?,?,?,?)
+    `).run(itemId, storeId, item.price || 0, item.available_quantity || 0, item.sold_quantity || 0, item.status || '');
+
+    const saved = db.prepare('SELECT * FROM competitors WHERE item_id=? AND store_id=?').get(itemId, storeId);
+    ok(res, { ok: true, item: saved });
+  } catch (e) {
+    apiErr(res, 400, `Não foi possível adicionar: ${e.message}`);
+  }
+});
+
+route('PUT', '/api/competitors', async (req, res, sess) => {
+  const p       = qp(req);
+  const itemId  = p.get('itemId');
+  if (!itemId) { apiErr(res, 400, 'itemId obrigatório'); return; }
+  const body    = await readBody(req);
+  const storeId = body.storeId || sess.store_id;
+
+  const update = {};
+  if (body.status !== undefined) update.status = body.status; // 'active' | 'paused'
+  if (body.label  !== undefined) update.label  = body.label;
+  if (!Object.keys(update).length) { apiErr(res, 400, 'Nada para atualizar'); return; }
+
+  try {
+    const sets = Object.keys(update).map(k => `${k}=?`).join(', ');
+    const result = db.prepare(`UPDATE competitors SET ${sets} WHERE item_id=? AND store_id=?`)
+      .run(...Object.values(update), itemId, storeId);
+    if (result.changes === 0) { apiErr(res, 404, 'Concorrente não encontrado'); return; }
+    ok(res, { ok: true });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+route('DELETE', '/api/competitors', (req, res, sess) => {
+  const p       = qp(req);
+  const itemId  = p.get('itemId');
+  const storeId = p.get('storeId') || sess.store_id;
+  if (!itemId) { apiErr(res, 400, 'itemId obrigatório'); return; }
+  try {
+    db.prepare('DELETE FROM competitors WHERE item_id=? AND store_id=?').run(itemId, storeId);
+    db.prepare('DELETE FROM competitor_history WHERE item_id=? AND store_id=?').run(itemId, storeId);
+    ok(res, { ok: true });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
 });
 
 route('GET', '/api/debug/orders', (req, res) => {
@@ -4928,6 +5060,56 @@ wss.on('connection', ws => {
     if (totalQ > 0) ws.send(JSON.stringify({ type: 'init_counts', data: { questions: totalQ }, ts: Date.now() }));
   } catch {}
 });
+
+// ============================================================
+// CONCORRENTES — polling de anúncios públicos de terceiros
+// ============================================================
+async function pollCompetitors() {
+  const rows = db.prepare("SELECT * FROM competitors WHERE status='active'").all();
+  for (const c of rows) {
+    try {
+      const item = await mlFetch(`/items/${c.item_id}`, {}, null);
+      const thumb = item.thumbnail || item.secure_thumbnail || c.thumbnail;
+
+      db.prepare(`
+        UPDATE competitors SET
+          title=?, price=?, original_price=?, available_quantity=?, sold_quantity=?,
+          listing_status=?, thumbnail=?, permalink=?, last_error='', last_checked_at=unixepoch()
+        WHERE item_id=? AND store_id=?
+      `).run(
+        item.title || c.title, item.price ?? c.price, item.original_price ?? c.original_price,
+        item.available_quantity ?? c.available_quantity, item.sold_quantity ?? c.sold_quantity,
+        item.status || c.listing_status, thumb, item.permalink || c.permalink,
+        c.item_id, c.store_id
+      );
+
+      // Só grava histórico se algo relevante mudou (evita inchar a tabela)
+      const changed = item.price !== c.price
+        || item.available_quantity !== c.available_quantity
+        || item.sold_quantity !== c.sold_quantity
+        || item.status !== c.listing_status;
+      if (changed) {
+        db.prepare(`
+          INSERT INTO competitor_history(item_id, store_id, price, available_quantity, sold_quantity, listing_status)
+          VALUES(?,?,?,?,?,?)
+        `).run(c.item_id, c.store_id, item.price || 0, item.available_quantity || 0, item.sold_quantity || 0, item.status || '');
+      }
+    } catch (e) {
+      // Anúncio pode ter sido excluído pelo concorrente — registra o erro mas continua monitorando
+      db.prepare('UPDATE competitors SET last_error=?, last_checked_at=unixepoch() WHERE item_id=? AND store_id=?')
+        .run(e.message.slice(0, 200), c.item_id, c.store_id);
+    }
+  }
+}
+
+// Polling de concorrentes a cada 20 minutos
+setInterval(() => {
+  pollCompetitors().catch(e => console.error('[poll] competitors:', e.message));
+}, 20 * 60_000);
+
+setTimeout(() => {
+  pollCompetitors().catch(() => {});
+}, 45_000);
 
 // Polling a cada 3 minutos
 setInterval(() => {

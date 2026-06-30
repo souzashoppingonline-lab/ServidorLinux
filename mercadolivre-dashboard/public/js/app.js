@@ -211,6 +211,7 @@ const PAGES = {
   performance:      renderPerformance,
   scheduler:        renderScheduler,
   ads:              renderAds,
+  concorrentes:     renderConcorrentes,
   customers:        renderCustomers,
   'vendas-totais':  renderVendasTotais,
   reposicao:          renderReposicao,
@@ -237,6 +238,7 @@ const PAGE_TITLES = {
   'performance':    'Performance de Anúncios',
   scheduler:        'Scheduler',
   ads:              'Publicidade (Mercado Ads)',
+  concorrentes:     'Concorrentes',
   customers:        'Clientes',
   'vendas-totais':  'Vendas Totais',
   reposicao:           'Alertas de Reposição',
@@ -4677,6 +4679,144 @@ async function renderCurvaABC() {
     <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:24px">${resumoHtml}</div>
     ${lojasHtml}`;
 }
+
+// ============================================================
+// CONCORRENTES
+// ============================================================
+async function renderConcorrentes() {
+  loading();
+  const storeId = State.currentStore;
+  let data;
+  try {
+    data = await API.get(`/api/competitors?storeId=${storeId}`);
+  } catch (e) {
+    setContent(`<div class="empty-state"><p>Erro ao carregar concorrentes: ${e.message}</p></div>`);
+    return;
+  }
+
+  const statusBadge = c => {
+    if (c.last_error) return `<span class="badge badge-red" title="${c.last_error}">⚠️ erro</span>`;
+    if (c.status === 'paused') return `<span class="badge badge-gray">⏸ Pausado</span>`;
+    return badge(STATUS_LISTING, c.listing_status || 'active');
+  };
+
+  const rows = data.items.map(c => {
+    const varTag = c.original_price > 0 && c.original_price > c.price
+      ? `<span style="color:#888;text-decoration:line-through;font-size:11px;margin-right:4px">${fmt.brl(c.original_price)}</span>` : '';
+    return `<tr>
+      <td><img src="${c.thumbnail || ''}" alt="" style="width:40px;height:40px;object-fit:cover;border-radius:4px;background:#222"></td>
+      <td style="max-width:280px">
+        <a href="${c.permalink}" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none" title="${c.title}">
+          ${c.label ? `<strong>${c.label}</strong><br>` : ''}
+          <span style="font-size:12px;color:#888">${(c.title || c.item_id).slice(0, 60)}</span>
+        </a>
+      </td>
+      <td>${c.item_id}</td>
+      <td style="text-align:right">${varTag}${fmt.brl(c.price)}</td>
+      <td style="text-align:center">${fmt.num(c.available_quantity)}</td>
+      <td style="text-align:center">${fmt.num(c.sold_quantity)}</td>
+      <td style="text-align:center">${statusBadge(c)}</td>
+      <td style="font-size:12px;color:#888">${c.last_checked_at ? fmt.dt(c.last_checked_at * 1000) : '—'}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn btn-sm btn-secondary" onclick="toggleCompetitor('${c.item_id}','${c.status === 'active' ? 'paused' : 'active'}')">
+          ${c.status === 'active' ? '⏸ Pausar' : '▶ Retomar'}
+        </button>
+        <button class="btn btn-sm btn-danger" onclick="deleteCompetitor('${c.item_id}','${(c.title||c.item_id).replace(/'/g,"")}')">🗑</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  setContent(`
+    <div class="page-header">
+      <h2>Concorrentes</h2>
+      <button class="btn btn-primary" onclick="openAddCompetitorModal()">+ Monitorar anúncio</button>
+    </div>
+    <p style="color:#888;font-size:13px;margin-bottom:16px">
+      Acompanhe preço, estoque e vendas de anúncios de outros vendedores. Cole o ID do anúncio (ex: MLB1234567890) —
+      ele continua sendo monitorado automaticamente a cada ~20 min até você pausar ou excluir.
+    </p>
+    ${data.items.length === 0
+      ? `<div class="empty-state"><p>Nenhum concorrente monitorado ainda.</p></div>`
+      : `<div class="card" style="overflow:auto">
+          <table class="table">
+            <thead><tr>
+              <th></th><th>Anúncio</th><th>ID</th>
+              <th style="text-align:right">Preço</th>
+              <th style="text-align:center">Estoque</th>
+              <th style="text-align:center">Vendidos</th>
+              <th style="text-align:center">Status</th>
+              <th>Última checagem</th>
+              <th></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`
+    }
+  `);
+}
+
+window.openAddCompetitorModal = () => {
+  Modal.open('Monitorar Concorrente', `
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">ID do anúncio (ML)</label>
+        <input type="text" id="compItemId" class="input" placeholder="Ex: MLB1234567890" style="width:100%;text-transform:uppercase">
+        <p style="font-size:12px;color:var(--text-3);margin-top:4px">Está no final do link do anúncio do concorrente.</p>
+      </div>
+      <div>
+        <label style="font-size:12px;font-weight:600;color:var(--text-2);display:block;margin-bottom:4px">Apelido (opcional)</label>
+        <input type="text" id="compLabel" class="input" placeholder="Ex: Loja XYZ - mesmo produto" style="width:100%">
+      </div>
+    </div>
+  `, `
+    <button class="btn btn-secondary" onclick="Modal.close()">Cancelar</button>
+    <button class="btn btn-primary" onclick="confirmAddCompetitor()">Adicionar</button>
+  `);
+};
+
+window.confirmAddCompetitor = async () => {
+  const item_id = document.getElementById('compItemId').value.trim().toUpperCase();
+  const label   = document.getElementById('compLabel').value.trim();
+  if (!item_id) { toast('Informe o ID do anúncio', 'error'); return; }
+  try {
+    await API.post('/api/competitors', { storeId: State.currentStore, item_id, label });
+    toast('Concorrente adicionado e sendo monitorado!', 'success');
+    Modal.close();
+    renderConcorrentes();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
+
+window.toggleCompetitor = async (itemId, newStatus) => {
+  try {
+    await API.put(`/api/competitors?itemId=${itemId}`, { storeId: State.currentStore, status: newStatus });
+    toast(newStatus === 'active' ? 'Monitoramento retomado' : 'Monitoramento pausado', 'success');
+    renderConcorrentes();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
+
+window.deleteCompetitor = (itemId, title) => {
+  Modal.open('Remover Concorrente', `
+    <p style="font-size:15px;color:var(--text)">Parar de monitorar <strong>${title}</strong>?</p>
+  `, `
+    <button class="btn btn-secondary" onclick="Modal.close()">Cancelar</button>
+    <button class="btn btn-danger" onclick="confirmDeleteCompetitor('${itemId}')">Remover</button>
+  `);
+};
+
+window.confirmDeleteCompetitor = async (itemId) => {
+  try {
+    await API.del(`/api/competitors?itemId=${itemId}&storeId=${State.currentStore}`);
+    toast('Concorrente removido.', 'success');
+    Modal.close();
+    renderConcorrentes();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+};
 
 // ============================================================
 // BOOT
