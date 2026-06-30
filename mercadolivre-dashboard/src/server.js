@@ -652,10 +652,26 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
   throw new Error('ML API 429: rate limit após retries');
 }
 
+// Lock por loja: evita múltiplas renovações simultâneas que causam 429
+const _tokenRefreshLocks = new Map();
+
 async function ensureFreshToken(store) {
   if (store.token_expires_at - Math.floor(Date.now() / 1000) < 300) {
-    const refreshed = await refreshToken(store.id, store.refresh_token);
-    return refreshed.access_token;
+    // Se já há uma renovação em andamento para esta loja, espera ela terminar
+    if (_tokenRefreshLocks.has(store.id)) {
+      try { await _tokenRefreshLocks.get(store.id); } catch {}
+      // Após a renovação terminar, pega o token atualizado do banco
+      const fresh = db.prepare('SELECT access_token FROM stores WHERE id=?').get(store.id);
+      return fresh?.access_token || store.access_token;
+    }
+    const promise = refreshToken(store.id, store.refresh_token);
+    _tokenRefreshLocks.set(store.id, promise);
+    try {
+      const refreshed = await promise;
+      return refreshed.access_token;
+    } finally {
+      _tokenRefreshLocks.delete(store.id);
+    }
   }
   return store.access_token;
 }

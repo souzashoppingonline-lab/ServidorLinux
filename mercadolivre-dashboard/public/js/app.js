@@ -1562,10 +1562,8 @@ async function renderStores() {
             </div>
 
             <div style="display:flex;gap:6px;margin-top:10px">
-              ${s.needs_reauth
-                ? `<a href="/ml/connect" class="btn btn-sm" style="flex:1;background:#f59e0b;color:#fff;border:none;text-align:center;text-decoration:none">🔗 Reconectar</a>`
-                : `<button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>`
-              }
+              <button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>
+              <a href="/ml/connect" class="btn btn-sm" style="background:#f59e0b;color:#fff;border:none;text-align:center;text-decoration:none;white-space:nowrap" title="Renovar autenticação OAuth">🔗 Reconectar</a>
               <button class="btn btn-sm btn-outline" onclick="window.editStore('${s.id}','${s.nickname}','${s.store_color||'#FFE600'}','${s.store_icon||'🏪'}',${s.tax_rate||0})" title="Personalizar">✏</button>
               ${stores.length > 1 ? `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" title="Desconectar" onclick="disconnectStore('${s.id}','${s.nickname}')">🗑</button>` : ''}
             </div>
