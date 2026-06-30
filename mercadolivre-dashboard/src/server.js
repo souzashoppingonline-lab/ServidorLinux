@@ -2592,7 +2592,81 @@ route('GET', '/api/messages/inbox', (req, res, sess) => {
       LIMIT 30
     `).all();
 
-    ok(res, { conversations: [...comCache, ...semCache] });
+    // packs_seen que não estão no cache nem nos pedidos com pack_id
+    const semCachePacks = db.prepare(`
+      SELECT p.pack_id, p.store_id, p.order_id, p.buyer,
+             s.nickname as store_name,
+             NULL as last_date, NULL as last_text, 0 as msg_count
+      FROM packs_seen p
+      JOIN stores s ON s.id = p.store_id
+      WHERE p.pack_id NOT LIKE 'noPack:%'
+        AND p.pack_id NOT IN (SELECT DISTINCT pack_id FROM messages_cache)
+        AND p.pack_id NOT IN (SELECT pack_id FROM orders WHERE pack_id != '' AND pack_id IS NOT NULL)
+      ORDER BY p.synced_at DESC
+      LIMIT 20
+    `).all();
+
+    const all = [...comCache, ...semCache, ...semCachePacks];
+    const seen = new Set();
+    const dedup = all.filter(c => {
+      const k = c.pack_id + '|' + c.store_id;
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+
+    ok(res, { conversations: dedup });
+  } catch (e) {
+    apiErr(res, 500, e.message);
+  }
+});
+
+// Discover: busca conversas reais no ML e salva pack_ids no packs_seen
+route('GET', '/api/messages/discover', async (req, res, sess) => {
+  const p = qp(req);
+  const storeId = p.get('storeId') || sess.store_id;
+  try {
+    const store = db.prepare('SELECT * FROM stores WHERE id=?').get(storeId);
+    if (!store) { apiErr(res, 404, 'Loja não encontrada'); return; }
+    const token = await ensureFreshToken(store);
+
+    // Busca packs com mensagens recentes no ML
+    const data = await mlFetch(`/messages/packs?seller_id=${storeId}&role=seller&tag=post_sale&offset=0&limit=30`, {}, storeId);
+    const packs = data?.results || data?.packs || [];
+
+    const insertPack = db.prepare('INSERT OR IGNORE INTO packs_seen(pack_id,store_id,order_id,buyer) VALUES(?,?,?,?)');
+    const insertMsg  = db.prepare(`INSERT OR IGNORE INTO messages_cache(pack_id,store_id,msg_id,from_user,text,created_at,notified) VALUES(?,?,?,?,?,?,1)`);
+
+    const conversations = [];
+    for (const pack of packs.slice(0, 20)) {
+      const packId = String(pack.id || pack.pack_id || '');
+      if (!packId) continue;
+
+      // Salva o pack
+      const order = db.prepare('SELECT id, buyer_nickname FROM orders WHERE pack_id=? LIMIT 1').get(packId);
+      insertPack.run(packId, storeId, order?.id || '', pack.buyer?.nickname || order?.buyer_nickname || '');
+
+      // Busca últimas mensagens deste pack
+      const msgData = await mlFetch(`/messages/packs/${packId}/sellers/${storeId}?tag=post_sale`, {}, storeId).catch(() => null);
+      const msgs = msgData?.messages || [];
+      for (const m of msgs) {
+        insertMsg.run(packId, storeId, String(m.id || m.created_at), m.from?.nickname || String(m.from?.user_id || ''), m.text?.plain || '', m.created_at || '');
+      }
+
+      const lastMsg = msgs[msgs.length - 1];
+      conversations.push({
+        pack_id:    packId,
+        store_id:   storeId,
+        store_name: store.nickname,
+        order_id:   order?.id || '',
+        buyer:      pack.buyer?.nickname || order?.buyer_nickname || 'Comprador',
+        last_date:  lastMsg?.created_at || '',
+        last_text:  lastMsg?.text?.plain || '',
+        msg_count:  msgs.length,
+      });
+    }
+
+    ok(res, { conversations, discovered: conversations.length });
   } catch (e) {
     apiErr(res, 500, e.message);
   }

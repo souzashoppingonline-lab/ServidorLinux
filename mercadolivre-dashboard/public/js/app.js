@@ -1020,11 +1020,31 @@ async function renderMessages() {
         <div class="page-title">Mensagens</div>
         <div class="page-subtitle">Conversas pós-venda — todas as lojas</div>
       </div>
+      <button onclick="discoverMessages()" id="btnDiscoverMsgs"
+        style="background:#FFE600;color:#111;border:none;border-radius:8px;padding:9px 18px;font-weight:700;cursor:pointer;font-size:13px">
+        🔍 Buscar conversas do ML
+      </button>
     </div>
     <div id="msgInbox"><div class="loading-state"><div class="spinner"></div></div></div>
   `);
   await loadMessagesInbox();
 }
+
+window.discoverMessages = async () => {
+  const btn = document.getElementById('btnDiscoverMsgs');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Buscando...'; }
+  try {
+    const storeId = State.currentStore?.id || '';
+    const data = await API.get(`/api/messages/discover?storeId=${storeId}`);
+    toast('success', `${data.discovered || 0} conversa(s) encontrada(s)`, '✅');
+    await loadMessagesInbox();
+  } catch (e) {
+    toast('error', e.message, '❌');
+  } finally {
+    const b = document.getElementById('btnDiscoverMsgs');
+    if (b) { b.disabled = false; b.textContent = '🔍 Buscar conversas do ML'; }
+  }
+};
 
 async function loadMessagesInbox() {
   const wrap = document.getElementById('msgInbox');
@@ -1033,7 +1053,12 @@ async function loadMessagesInbox() {
     const data = await API.get('/api/messages/inbox');
     const convs = data.conversations || [];
     if (!convs.length) {
-      wrap.innerHTML = `<div class="empty-state"><div class="empty-state-icon">💬</div><h3>Nenhuma conversa</h3><p>As mensagens aparecem aqui quando compradores entrarem em contato.</p></div>`;
+      wrap.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">💬</div>
+          <h3>Nenhuma conversa</h3>
+          <p>Clique em <b>Buscar conversas do ML</b> para carregar suas conversas do Mercado Livre.</p>
+        </div>`;
       return;
     }
     wrap.innerHTML = `
