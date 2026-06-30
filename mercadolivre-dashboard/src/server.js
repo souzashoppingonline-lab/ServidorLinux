@@ -34,8 +34,8 @@ const SCHEDULER_CONFIG = {
   batchDelay: 60000,        // 1 minute between listing batch pages
   minDelay: 1000,           // minimum delay between API calls (ms)
   maxCallsPerMinute: 15,    // max API calls per minute (ML free tier ~20/min, leave headroom)
-  ordersInterval: 300000,   // 5 minutes
-  questionsInterval: 2400000, // 40 minutes
+  ordersInterval: 900000,   // 15 minutes
+  questionsInterval: 3600000, // 1 hour
   stockInterval: 7200000,   // 2 hours
   visitsHour: 3,            // 3am for visits sync
   visitsDelayMs: 3000,      // 3s between each day fetch for visits
@@ -498,6 +498,110 @@ try {
       checked_at          INTEGER DEFAULT (unixepoch())
     );
     CREATE INDEX IF NOT EXISTS idx_competitor_history_item ON competitor_history(item_id, store_id, checked_at);
+  `);
+} catch {}
+
+// New columns for orders
+for (const col of [
+  "ALTER TABLE orders ADD COLUMN logistics_type TEXT DEFAULT ''",
+  "ALTER TABLE orders ADD COLUMN tracking_number TEXT DEFAULT ''",
+]) { try { db.exec(col); } catch {} }
+
+// New tables for webhook data
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ml_shipments (
+      id TEXT PRIMARY KEY,
+      store_id TEXT NOT NULL,
+      order_id TEXT DEFAULT '',
+      status TEXT DEFAULT '',
+      substatus TEXT DEFAULT '',
+      tracking_number TEXT DEFAULT '',
+      carrier TEXT DEFAULT '',
+      service_id TEXT DEFAULT '',
+      date_created TEXT DEFAULT '',
+      date_first_printed TEXT DEFAULT '',
+      date_delivered TEXT DEFAULT '',
+      receiver_name TEXT DEFAULT '',
+      receiver_city TEXT DEFAULT '',
+      receiver_state TEXT DEFAULT '',
+      synced_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ml_claims (
+      id TEXT PRIMARY KEY,
+      store_id TEXT NOT NULL,
+      order_id TEXT DEFAULT '',
+      resource_id TEXT DEFAULT '',
+      reason_id TEXT DEFAULT '',
+      status TEXT DEFAULT '',
+      type TEXT DEFAULT '',
+      date_created TEXT DEFAULT '',
+      last_updated TEXT DEFAULT '',
+      resolution TEXT DEFAULT '',
+      synced_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ml_messages (
+      id TEXT PRIMARY KEY,
+      store_id TEXT NOT NULL,
+      pack_id TEXT DEFAULT '',
+      order_id TEXT DEFAULT '',
+      from_user_id TEXT DEFAULT '',
+      from_nickname TEXT DEFAULT '',
+      to_user_id TEXT DEFAULT '',
+      text TEXT DEFAULT '',
+      date_created TEXT DEFAULT '',
+      status TEXT DEFAULT '',
+      synced_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ml_fees (
+      order_id TEXT NOT NULL,
+      store_id TEXT NOT NULL,
+      item_id TEXT DEFAULT '',
+      sale_fee_amount REAL DEFAULT 0,
+      shipping_fee REAL DEFAULT 0,
+      tax_amount REAL DEFAULT 0,
+      synced_at INTEGER DEFAULT (unixepoch()),
+      PRIMARY KEY (order_id, item_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS price_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id TEXT NOT NULL,
+      store_id TEXT NOT NULL,
+      price REAL NOT NULL,
+      original_price REAL DEFAULT 0,
+      recorded_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS stock_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      item_id TEXT NOT NULL,
+      store_id TEXT NOT NULL,
+      available_quantity INTEGER NOT NULL,
+      sold_quantity INTEGER DEFAULT 0,
+      recorded_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS ml_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      topic TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      store_id TEXT DEFAULT '',
+      payload TEXT DEFAULT '{}',
+      processed INTEGER DEFAULT 0,
+      processed_at INTEGER DEFAULT 0,
+      error TEXT DEFAULT '',
+      received_at INTEGER DEFAULT (unixepoch())
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ml_events_unprocessed ON ml_events(processed, received_at);
+    CREATE INDEX IF NOT EXISTS idx_price_history_item ON price_history(item_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_stock_history_item ON stock_history(item_id, recorded_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_shipments_order ON ml_shipments(order_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_pack ON ml_messages(pack_id);
   `);
 } catch {}
 
