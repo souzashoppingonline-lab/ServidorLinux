@@ -4126,6 +4126,37 @@ async function renderMonitor() {
       </div>`;
     })()}
 
+    <!-- SERVIÇOS DO SERVIDOR -->
+    ${(() => {
+      const servicos = status.servicos || [];
+      if (!servicos.length) return '';
+      const corStatus = (st) => st === 'active' ? '#22c55e' : st === 'não instalado' ? '#555' : '#ef4444';
+      const labelStatus = (st) => ({
+        active: 'Ativo', inactive: 'Inativo', failed: 'Falhou',
+        activating: 'Iniciando', deactivating: 'Parando',
+        'não instalado': 'Não instalado', unknown: 'Desconhecido',
+      }[st] || st);
+      return `
+      <div class="card" style="margin-bottom:20px">
+        <div style="font-weight:600;margin-bottom:12px">🧩 Serviços do Servidor</div>
+        <table class="table">
+          <thead><tr><th>Serviço</th><th style="text-align:center">Status</th><th style="text-align:center">Inicialização</th></tr></thead>
+          <tbody>${servicos.map(sv => `
+            <tr>
+              <td>${sv.label}</td>
+              <td style="text-align:center">
+                <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:${corStatus(sv.status)}">
+                  <span style="width:8px;height:8px;border-radius:50%;background:${corStatus(sv.status)};display:inline-block"></span>
+                  ${labelStatus(sv.status)}
+                </span>
+              </td>
+              <td style="text-align:center;font-size:12px;color:#888">${sv.enabled === 'enabled' ? 'Automática' : sv.enabled === 'disabled' ? 'Manual' : (sv.enabled || '—')}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    })()}
+
     <!-- VENDAS HOJE -->
     <div class="card" style="margin-bottom:20px">
       <div style="font-weight:600;margin-bottom:12px">🛒 Vendas hoje por loja</div>

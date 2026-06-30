@@ -4211,6 +4211,61 @@ function coletarStatus() {
   return { vendas, estoqueCritico, scheduler, errosHora, gerado_em: new Date().toISOString() };
 }
 
+// Verifica status (systemctl) de um serviço, tentando uma lista de nomes candidatos
+function checkService(candidatos) {
+  for (const nome of candidatos) {
+    try {
+      execSync(`systemctl cat ${nome} >/dev/null 2>&1`);
+    } catch {
+      continue; // unidade não existe, tenta o próximo nome candidato
+    }
+    let status = 'unknown', enabled = 'unknown';
+    try { status = execSync(`systemctl is-active ${nome} 2>/dev/null`, { encoding: 'utf8' }).trim(); }
+    catch (e) { status = (e.stdout || '').toString().trim() || 'inactive'; }
+    try { enabled = execSync(`systemctl is-enabled ${nome} 2>/dev/null`, { encoding: 'utf8' }).trim(); }
+    catch (e) { enabled = (e.stdout || '').toString().trim() || 'desativado'; }
+    return { nome, status, enabled };
+  }
+  return null;
+}
+
+// Coleta status dos principais serviços do servidor
+function coletarServicos() {
+  const lista = [
+    { label: '🛡️ fail2ban',       candidatos: ['fail2ban'] },
+    { label: '🔥 Firewall (UFW)',  candidatos: ['ufw'] },
+    { label: '🐳 Docker',          candidatos: ['docker'] },
+    { label: '🗄️ Banco de Dados',  candidatos: ['postgresql', 'mysql', 'mariadb'] },
+    { label: '⚡ PM2',              candidatos: ['pm2-root', 'pm2-www-data'] },
+    { label: '🟢 Node.js (App)',   candidatos: ['ml-dashboard'] },
+    { label: '🔑 SSH',             candidatos: ['ssh', 'sshd'] },
+    { label: '🌐 Nginx',           candidatos: ['nginx'] },
+    { label: '⏰ Cron',            candidatos: ['cron', 'crond'] },
+  ];
+
+  const servicos = lista.map(item => {
+    const r = checkService(item.candidatos);
+    return {
+      label: item.label,
+      nome: r ? r.nome : item.candidatos[0],
+      status: r ? r.status : 'não instalado',
+      enabled: r ? r.enabled : '',
+    };
+  });
+
+  // SQLite não é um serviço systemd: verifica se o banco responde a uma query
+  let dbStatus = 'inactive';
+  try { db.prepare('SELECT 1').get(); dbStatus = 'active'; } catch { dbStatus = 'failed'; }
+  const dbItem = servicos.find(s => s.label === '🗄️ Banco de Dados');
+  if (dbItem && dbItem.status === 'não instalado') {
+    dbItem.nome = 'SQLite (arquivo local)';
+    dbItem.status = dbStatus;
+    dbItem.enabled = '';
+  }
+
+  return servicos;
+}
+
 // Coleta snapshot de saúde do servidor (disco, CPU, memória, rede, conexões, SSH banidos)
 let _netPrev = null;
 function coletarStatusServidor() {
@@ -4436,6 +4491,16 @@ async function dispararAlertas(forceAll = false) {
     } else {
       linhas.push('  🚫 SSH banidos: fail2ban não disponível/configurado');
     }
+
+    const servicos = coletarServicos();
+    const fora = servicos.filter(sv => sv.status !== 'active' && sv.status !== 'não instalado');
+    linhas.push('');
+    if (fora.length > 0) {
+      linhas.push('🔧 <b>Serviços com problema:</b>');
+      fora.forEach(sv => linhas.push(`  🔴 ${sv.label.replace(/^[^\s]+\s/, '')}: ${sv.status}`));
+    } else {
+      linhas.push('✅ <b>Serviços:</b> todos ativos');
+    }
   }
 
   const texto = linhas.join('\n');
@@ -4492,6 +4557,7 @@ route('GET', '/api/monitor/status', (req, res, sess) => {
     };
     s.last_alert_sent = monitorGet('last_alert_sent', null);
     s.servidor = coletarStatusServidor();
+    s.servicos = coletarServicos();
     ok(res, s);
   } catch (e) {
     apiErr(res, 500, e.message);
