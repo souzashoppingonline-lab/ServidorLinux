@@ -400,12 +400,35 @@ document.addEventListener('click', e => {
 async function renderDashboard() {
   loading();
   try {
-    const [data, repData] = await Promise.all([
+    const [data, repData, monCfg] = await Promise.all([
       API.dashboard(State.currentStore),
       API.get(`/api/reputation?storeId=${State.currentStore}`).catch(() => ({ reputation: null })),
+      API.get('/api/monitor/config').catch(() => ({})),
     ]);
     const { kpis, chartData, recentOrders } = data;
     const rep = repData.reputation;
+    const metaDiaria = parseFloat(monCfg.meta_diaria || 0);
+
+    const metaBarHtml = metaDiaria > 0 ? (() => {
+      const pct     = Math.min((kpis.revenueToday / metaDiaria) * 100, 100);
+      const pctReal = (kpis.revenueToday / metaDiaria) * 100;
+      const color   = pct >= 100 ? '#10b981' : pct >= 60 ? '#f59e0b' : '#ef4444';
+      const emoji   = pct >= 100 ? '🏆' : pct >= 60 ? '🔥' : '🎯';
+      return `
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin-bottom:16px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <span style="font-size:13px;font-weight:700;color:var(--text-1)">${emoji} Meta Diária de Faturamento</span>
+            <span style="font-size:13px;font-weight:700;color:${color}">${fmt.brl(kpis.revenueToday)} <span style="color:var(--text-2);font-weight:400">/ ${fmt.brl(metaDiaria)}</span></span>
+          </div>
+          <div style="background:rgba(255,255,255,.08);border-radius:20px;height:12px;overflow:hidden">
+            <div style="background:${color};width:${pct}%;height:100%;border-radius:20px;transition:width .5s ease"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;margin-top:5px">
+            <span style="font-size:11px;color:var(--text-2)">${pctReal.toFixed(1)}% da meta atingida</span>
+            <span style="font-size:11px;color:var(--text-2)">${pctReal < 100 ? 'Faltam ' + fmt.brl(metaDiaria - kpis.revenueToday) : '✅ Meta batida!'}</span>
+          </div>
+        </div>`;
+    })() : '';
 
     const html = `
       <div class="page-header">
@@ -414,6 +437,8 @@ async function renderDashboard() {
           <div class="page-subtitle">Visão geral dos últimos 30 dias</div>
         </div>
       </div>
+
+      ${metaBarHtml}
 
       <div class="kpi-grid">
         ${kpiCard('Receita 30 dias', fmt.brl(kpis.revenue30d), 'Período atual', '💰', '#FFE600')}
@@ -3780,6 +3805,7 @@ async function renderDevolucoes() {
     </div>
     <div class="filters">
       ${[7,15,30,60].map(d=>`<button class="period-btn ${d===30?'active':''}" onclick="loadDevolucoes(${d},this)">${d}d</button>`).join('')}
+      <button class="period-btn" onclick="loadDevolucoes(365,this)" style="background:rgba(239,68,68,.15);border-color:#ef4444;color:#ef4444">📅 Relatório Anual</button>
     </div>
     <div id="devBody"><div class="loading-state"><div class="spinner"></div></div></div>
   `);
@@ -3830,6 +3856,55 @@ async function loadDevolucoes(days, btn) {
             </tr>`).join('')}
           </tbody>
         </table>
+      </div>` : ''}
+
+      ${(d.mensal||[]).length ? `
+      <div class="card" style="margin-bottom:16px">
+        <div style="font-weight:600;margin-bottom:14px;font-size:15px">📅 Prejuízo por Mês — Últimos 12 meses</div>
+        <div style="overflow-x:auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Mês</th>
+                <th style="text-align:center">Cancelamentos</th>
+                <th style="text-align:right">Vendas Perdidas</th>
+                <th style="text-align:right">Custo Perdido</th>
+                <th style="text-align:right">Tarifa Perdida</th>
+                <th style="text-align:right">Frete Perdido</th>
+                <th style="text-align:right;color:#ef4444">= Prejuízo Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${d.mensal.map(m => {
+                const pBar = d.mensal[0]?.prejuizo_total > 0 ? (m.prejuizo_total / d.mensal[0].prejuizo_total * 100) : 0;
+                return `
+                <tr style="border-bottom:1px solid var(--border)">
+                  <td style="font-weight:700;white-space:nowrap">${m.mes_label}</td>
+                  <td style="text-align:center">${m.qtd_cancelamentos}</td>
+                  <td style="text-align:right;color:#ef4444">${fmt.brl(m.total_perdido)}</td>
+                  <td style="text-align:right;color:#f59e0b">${fmt.brl(m.custo_perdido)}</td>
+                  <td style="text-align:right;color:#f59e0b">${fmt.brl(m.tarifa_perdida)}</td>
+                  <td style="text-align:right;color:#f59e0b">${fmt.brl(m.frete_perdido)}</td>
+                  <td style="text-align:right">
+                    <span style="font-weight:800;color:#ef4444">${fmt.brl(m.prejuizo_total)}</span>
+                    <div style="background:rgba(239,68,68,.15);border-radius:4px;height:4px;margin-top:3px;min-width:60px">
+                      <div style="background:#ef4444;width:${pBar.toFixed(0)}%;height:100%;border-radius:4px"></div>
+                    </div>
+                  </td>
+                </tr>`;
+              }).join('')}
+              <tr style="background:rgba(239,68,68,.08);font-weight:800">
+                <td>TOTAL</td>
+                <td style="text-align:center">${d.mensal.reduce((s,m)=>s+m.qtd_cancelamentos,0)}</td>
+                <td style="text-align:right;color:#ef4444">${fmt.brl(d.mensal.reduce((s,m)=>s+m.total_perdido,0))}</td>
+                <td style="text-align:right;color:#f59e0b">${fmt.brl(d.mensal.reduce((s,m)=>s+m.custo_perdido,0))}</td>
+                <td style="text-align:right;color:#f59e0b">${fmt.brl(d.mensal.reduce((s,m)=>s+m.tarifa_perdida,0))}</td>
+                <td style="text-align:right;color:#f59e0b">${fmt.brl(d.mensal.reduce((s,m)=>s+m.frete_perdido,0))}</td>
+                <td style="text-align:right;color:#ef4444;font-size:15px">${fmt.brl(d.mensal.reduce((s,m)=>s+m.prejuizo_total,0))}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>` : ''}
 
       ${d.orders.length ? `
@@ -4074,6 +4149,7 @@ async function renderMonitor() {
         ${toggle('alert_erros',      'Alertas de erros críticos', 'Avisa quando há muitas falhas em 1 hora')}
         ${toggle('alert_perguntas',    'Novas perguntas (Telegram)',    'Alerta imediato ao receber nova pergunta de comprador')}
         ${toggle('alert_mensagens',    'Novas mensagens (Telegram)',    'Alerta imediato ao receber mensagem pós-venda')}
+        ${toggle('alert_pedido_novo',  '🛒 Novo pedido pago',           'Alerta instantâneo no Telegram a cada pedido pago')}
         ${toggle('alert_cancelamentos','Cancelamentos',                 'Alerta quando um pedido for cancelado')}
         ${toggle('alert_anuncios',     'Anúncios pausados/sem estoque', 'Alerta quando anúncio for pausado ou zerar estoque')}
         <div style="margin-top:12px">
@@ -4087,6 +4163,13 @@ async function renderMonitor() {
           <input id="tg_err_thresh" type="number" min="1" max="50" value="${cfg.threshold_erros || 3}"
             onchange="monitorSave()"
             style="width:80px;padding:6px;background:#1a1a1a;border:1px solid #333;border-radius:6px;color:#fff;font-size:13px;margin-top:4px">
+        </div>
+        <div style="margin-top:16px;border-top:1px solid #333;padding-top:14px">
+          <label style="font-size:12px;color:#FFE600;font-weight:700;display:block;margin-bottom:6px">🎯 Meta de Faturamento Diário (R$)</label>
+          <input id="meta_diaria" type="number" min="0" step="100" value="${cfg.meta_diaria || 0}"
+            onchange="monitorSave()"
+            style="width:140px;padding:8px;background:#1a1a1a;border:1px solid #FFE600;border-radius:6px;color:#FFE600;font-size:15px;font-weight:700;margin-top:2px">
+          <div style="font-size:11px;color:#666;margin-top:4px">Aparece como barra de progresso no Dashboard</div>
         </div>
       </div>
     </div>
@@ -4125,8 +4208,10 @@ window.monitorSave = async function() {
     alert_erros:      document.getElementById('tog_alert_erros')?.checked      || false,
     alert_perguntas:  document.getElementById('tog_alert_perguntas')?.checked  || false,
     alert_mensagens:      document.getElementById('tog_alert_mensagens')?.checked      || false,
+    alert_pedido_novo:    document.getElementById('tog_alert_pedido_novo')?.checked    || false,
     alert_cancelamentos:  document.getElementById('tog_alert_cancelamentos')?.checked  || false,
     alert_anuncios:       document.getElementById('tog_alert_anuncios')?.checked       || false,
+    meta_diaria:          parseFloat(document.getElementById('meta_diaria')?.value     || 0),
   };
   try {
     await API.put('/api/monitor/config', body);

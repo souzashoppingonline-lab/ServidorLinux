@@ -732,8 +732,10 @@ const JOB_HANDLERS = {
       const insertOrder = db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost,pack_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       const deleteItems = db.prepare('DELETE FROM order_items WHERE order_id=?');
       const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
+      const newOrdersForAlert = [];
       db.transaction((orders) => {
         for (const o of orders) {
+          const existing = db.prepare('SELECT id FROM orders WHERE id=?').get(String(o.id));
           const addr = o.shipping?.receiver_address || {};
           // payments[].shipping_cost = what ML charges the SELLER for shipping (not buyer)
           const sellerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
@@ -753,8 +755,28 @@ const JOB_HANDLERS = {
             insertItem.run(orderId, storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
           }
           // logistic_type será buscado pelo job sync_shipment_types separadamente
+          if (!existing && o.status === 'paid') {
+            newOrdersForAlert.push(o);
+          }
         }
       })(page.results);
+
+      // Alerta Telegram para pedidos novos
+      if (newOrdersForAlert.length && monitorGet('enabled', false) && monitorGet('alert_pedido_novo', true)) {
+        const tgToken  = monitorGet('telegram_token', '');
+        const tgChat   = monitorGet('telegram_chat_id', '');
+        const store    = db.prepare('SELECT nickname FROM stores WHERE id=?').get(storeId);
+        if (tgToken && tgChat) {
+          for (const o of newOrdersForAlert) {
+            const firstItem = (o.order_items||[])[0];
+            const itemTitle = firstItem?.item?.title || 'Produto';
+            const shortTitle = itemTitle.length > 40 ? itemTitle.slice(0, 40) + '…' : itemTitle;
+            const qtd = (o.order_items||[]).reduce((s, i) => s + (i.quantity||1), 0);
+            const msg = `🛒 <b>Novo Pedido!</b>\n👤 ${o.buyer?.nickname || 'Comprador'}\n📦 ${shortTitle}${qtd > 1 ? ` (${qtd} un.)` : ''}\n💰 <b>R$ ${(o.total_amount||0).toFixed(2).replace('.',',')}</b>\n🏪 ${store?.nickname || storeId}`;
+            sendTelegram(tgToken, tgChat, msg).catch(() => {});
+          }
+        }
+      }
 
       total += page.results.length;
       if (page.results.length < 50) break;
@@ -3723,10 +3745,46 @@ route('GET', '/api/devolucoes', (req, res, sess) => {
     const totalPedidosPago = db.prepare(`SELECT COUNT(*) as n FROM orders WHERE status='paid' AND date_created >= ? ${whereSimples}`).get(from).n;
     const pctCancelamentos = totalPedidosPago > 0 ? (rows.length / totalPedidosPago * 100).toFixed(1) : 0;
 
+    // Relatório mensal: últimos 12 meses
+    const mensalRows = db.prepare(`
+      SELECT
+        strftime('%Y-%m', o.date_created) AS mes,
+        COUNT(DISTINCT o.id) AS qtd_cancelamentos,
+        SUM(oi.unit_price * oi.quantity) AS total_perdido,
+        SUM(COALESCE(oc.cost, 0)) AS custo_perdido,
+        SUM(COALESCE(oi.sale_fee, 0)) AS tarifa_perdida,
+        SUM(COALESCE(o.seller_shipping_cost, 0)) AS frete_perdido
+      FROM orders o
+      JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN order_costs oc ON oc.order_id = o.id AND oc.item_id = oi.item_id
+      WHERE o.status = 'cancelled'
+        AND o.date_created >= datetime('now', '-12 months')
+        ${storeId ? `AND o.store_id = '${storeId}'` : ''}
+      GROUP BY mes
+      ORDER BY mes DESC
+    `).all();
+
+    const MESES_PT = ['','Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+    const mensal = mensalRows.map(r => {
+      const [ano, m] = r.mes.split('-');
+      const prejuizo = (r.total_perdido||0) + (r.custo_perdido||0) + (r.tarifa_perdida||0) + (r.frete_perdido||0);
+      return {
+        mes:              r.mes,
+        mes_label:        `${MESES_PT[parseInt(m)]}/${ano}`,
+        qtd_cancelamentos:r.qtd_cancelamentos,
+        total_perdido:    r.total_perdido || 0,
+        custo_perdido:    r.custo_perdido || 0,
+        tarifa_perdida:   r.tarifa_perdida || 0,
+        frete_perdido:    r.frete_perdido || 0,
+        prejuizo_total:   prejuizo,
+      };
+    });
+
     ok(res, {
       orders:       rows,
       by_store:     Object.values(byStore),
       top_produtos: topProdList,
+      mensal,
       resumo: {
         total_devolvido:    totalDevolvido,
         qtd_cancelamentos:  rows.length,
@@ -4081,6 +4139,8 @@ const MONITOR_DEFAULTS = {
   alert_mensagens:     true,
   alert_cancelamentos: true,
   alert_anuncios:      true,
+  alert_pedido_novo:   true,
+  meta_diaria:         0,
   threshold_estoque_dias: 7,
   threshold_erros:  3,
   quiet_start:      0,
