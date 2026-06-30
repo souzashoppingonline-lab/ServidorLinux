@@ -619,9 +619,25 @@ async function mlFetch(apiPath, opts = {}, storeId = null) {
   throw new Error('ML API 429: rate limit após retries');
 }
 
+// Refresh em andamento por loja, para evitar que chamadas concorrentes consumam
+// o mesmo refresh_token (uso único na API do ML) e uma delas falhe com invalid_grant.
+const _refreshInFlight = new Map();
+
 async function ensureFreshToken(store) {
   if (store.token_expires_at - Math.floor(Date.now() / 1000) < 300) {
-    const refreshed = await refreshToken(store.id, store.refresh_token);
+    if (_refreshInFlight.has(store.id)) {
+      const refreshed = await _refreshInFlight.get(store.id);
+      return refreshed.access_token;
+    }
+    // Relê o token mais recente do banco — outra chamada pode já ter renovado.
+    const fresh = db.prepare('SELECT access_token, refresh_token, token_expires_at FROM stores WHERE id=?').get(store.id);
+    if (fresh && fresh.token_expires_at - Math.floor(Date.now() / 1000) >= 300) {
+      return fresh.access_token;
+    }
+    const p = refreshToken(store.id, fresh ? fresh.refresh_token : store.refresh_token)
+      .finally(() => _refreshInFlight.delete(store.id));
+    _refreshInFlight.set(store.id, p);
+    const refreshed = await p;
     return refreshed.access_token;
   }
   return store.access_token;
@@ -639,7 +655,11 @@ async function refreshToken(storeId, rToken) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
   });
-  if (!res.ok) throw new Error('Falha ao renovar token');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    console.error(`[token:${storeId}] Falha ao renovar token (${res.status}): ${text.slice(0, 300)}`);
+    throw new Error(`Falha ao renovar token (${res.status}): ${text.slice(0, 300)}`);
+  }
   const data = await res.json();
   const exp = Math.floor(Date.now() / 1000) + (data.expires_in || 21600);
   db.prepare('UPDATE stores SET access_token=?,refresh_token=?,token_expires_at=? WHERE id=?')
