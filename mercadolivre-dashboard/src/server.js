@@ -263,6 +263,7 @@ for (const col of [
   "ALTER TABLE stores ADD COLUMN connected_at INTEGER DEFAULT 0",
   "ALTER TABLE stores ADD COLUMN permissions TEXT DEFAULT '[]'",
   "ALTER TABLE stores ADD COLUMN tax_rate REAL DEFAULT 0",
+  "ALTER TABLE stores ADD COLUMN needs_reauth INTEGER DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN shipping_cost REAL DEFAULT 0",
   "ALTER TABLE orders ADD COLUMN shipping_id TEXT DEFAULT ''",
   "ALTER TABLE orders ADD COLUMN buyer_shipping_cost REAL DEFAULT 0",
@@ -671,10 +672,20 @@ async function refreshToken(storeId, rToken) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
     body: body.toString(),
   });
-  if (!res.ok) throw new Error('Falha ao renovar token');
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = await res.text(); } catch {}
+    console.error(`[token] Falha ao renovar token store=${storeId} status=${res.status} body=${errBody}`);
+    // invalid_grant = token expirado/revogado — marcar loja como precisa reconectar
+    if (res.status === 401 || errBody.includes('invalid_grant') || errBody.includes('invalid_token')) {
+      db.prepare('UPDATE stores SET needs_reauth=1, last_error=?, last_error_at=unixepoch() WHERE id=?')
+        .run(`Token expirado — reconecte a loja via OAuth (${new Date().toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'})})`, storeId);
+    }
+    throw new Error(`Falha ao renovar token (HTTP ${res.status}): ${errBody.slice(0, 200)}`);
+  }
   const data = await res.json();
   const exp = Math.floor(Date.now() / 1000) + (data.expires_in || 21600);
-  db.prepare('UPDATE stores SET access_token=?,refresh_token=?,token_expires_at=? WHERE id=?')
+  db.prepare('UPDATE stores SET access_token=?,refresh_token=?,token_expires_at=?,needs_reauth=0 WHERE id=?')
     .run(data.access_token, data.refresh_token, exp, storeId);
   return data;
 }
@@ -1693,7 +1704,7 @@ route('GET', '/ml/callback', async (req, res) => {
         nickname=excluded.nickname, email=excluded.email,
         access_token=excluded.access_token, refresh_token=excluded.refresh_token,
         token_expires_at=excluded.token_expires_at, permalink=excluded.permalink, thumbnail=excluded.thumbnail,
-        status='active', sync_status='idle', last_error='', last_error_at=0
+        status='active', sync_status='idle', last_error='', last_error_at=0, needs_reauth=0
     `).run(
       String(user.id), user.nickname || '', user.email || '',
       tokens.access_token, tokens.refresh_token || '', exp,
@@ -1767,7 +1778,7 @@ route('GET', '/api/stores', (req, res, sess) => {
     SELECT s.id, s.nickname, s.email, s.site_id, s.permalink, s.thumbnail,
            s.created_at, s.last_sync, s.status, s.store_color, s.store_icon,
            s.account_type, s.sync_status, s.last_error, s.last_error_at,
-           s.country_id, s.currency_id, s.connected_at, s.tax_rate,
+           s.country_id, s.currency_id, s.connected_at, s.tax_rate, s.needs_reauth,
            (SELECT sl.status FROM sync_log sl WHERE sl.store_id=s.id ORDER BY sl.last_sync DESC LIMIT 1) as last_sync_status,
            (SELECT COUNT(*) FROM orders WHERE store_id=s.id AND status='paid') as total_orders,
            (SELECT COUNT(*) FROM listings WHERE store_id=s.id AND status='active') as active_listings

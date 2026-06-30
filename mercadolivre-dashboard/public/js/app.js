@@ -268,13 +268,19 @@ function navigate(page) {
 function buildStoreSelector() {
   const sel = document.getElementById('storeSelect');
   sel.innerHTML = State.stores.map(s =>
-    `<option value="${s.id}" ${s.id === State.currentStore ? 'selected' : ''}>${s.nickname}</option>`
+    `<option value="${s.id}" ${s.id === State.currentStore ? 'selected' : ''}>${s.needs_reauth ? '⚠ ' : ''}${s.nickname}</option>`
   ).join('');
   sel.onchange = () => {
     State.currentStore = sel.value;
     const page = location.hash.replace('#', '') || 'dashboard';
     navigate(page);
   };
+  // Alertar se alguma loja precisa reconectar
+  const reauthStores = State.stores.filter(s => s.needs_reauth);
+  if (reauthStores.length > 0) {
+    const nomes = reauthStores.map(s => s.nickname).join(', ');
+    toast(`⚠ Token expirado: ${nomes}. Acesse Lojas para reconectar.`, 'error');
+  }
 }
 
 function updateSidebarUser(store) {
@@ -1500,6 +1506,7 @@ async function renderStores() {
     buildStoreSelector();
 
     function syncStatusBadge(s) {
+      if (s.needs_reauth)              return `<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">⚠ Token expirado</span>`;
       if (s.sync_status === 'syncing') return `<span style="background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">⟳ Sincronizando</span>`;
       if (s.sync_status === 'error')   return `<span style="background:#fee2e2;color:#dc2626;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">✕ Erro</span>`;
       if (s.status === 'inactive')     return `<span style="background:#f3f4f6;color:#6b7280;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600">Inativo</span>`;
@@ -1544,7 +1551,10 @@ async function renderStores() {
               </div>
             </div>
 
-            ${s.last_error ? `<div style="font-size:11px;color:#dc2626;background:#fee2e2;padding:6px 8px;border-radius:4px;margin-bottom:8px;word-break:break-word">${s.last_error.slice(0,120)}</div>` : ''}
+            ${s.needs_reauth ? `<div style="font-size:12px;color:#92400e;background:#fef3c7;border:1px solid #fcd34d;padding:8px 10px;border-radius:6px;margin-bottom:8px">
+              <strong>⚠ Token expirado ou revogado.</strong><br>
+              O Mercado Livre recusou a renovação automática. Clique em <strong>Reconectar</strong> para reautorizar esta loja.
+            </div>` : (s.last_error ? `<div style="font-size:11px;color:#dc2626;background:#fee2e2;padding:6px 8px;border-radius:4px;margin-bottom:8px;word-break:break-word">${s.last_error.slice(0,120)}</div>` : '')}
 
             <div style="display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-3)">
               <span>Conectada: ${s.connected_at ? new Date(s.connected_at*1000).toLocaleDateString('pt-BR') : '—'}</span>
@@ -1552,7 +1562,10 @@ async function renderStores() {
             </div>
 
             <div style="display:flex;gap:6px;margin-top:10px">
-              <button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>
+              ${s.needs_reauth
+                ? `<a href="/ml/connect" class="btn btn-sm" style="flex:1;background:#f59e0b;color:#fff;border:none;text-align:center;text-decoration:none">🔗 Reconectar</a>`
+                : `<button class="btn btn-sm" style="flex:1" onclick="window.switchStore('${s.id}')">Selecionar</button>`
+              }
               <button class="btn btn-sm btn-outline" onclick="window.editStore('${s.id}','${s.nickname}','${s.store_color||'#FFE600'}','${s.store_icon||'🏪'}',${s.tax_rate||0})" title="Personalizar">✏</button>
               ${stores.length > 1 ? `<button class="btn btn-sm" style="background:#fee2e2;color:#dc2626;border:none" title="Desconectar" onclick="disconnectStore('${s.id}','${s.nickname}')">🗑</button>` : ''}
             </div>
