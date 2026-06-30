@@ -4274,7 +4274,12 @@ function coletarStatusServidor() {
   } catch {}
 
   try {
-    const out = execSync("fail2ban-client status sshd 2>/dev/null", { encoding: 'utf8' });
+    let out;
+    try {
+      out = execSync("sudo -n fail2ban-client status sshd 2>/dev/null", { encoding: 'utf8' });
+    } catch {
+      out = execSync("fail2ban-client status sshd 2>/dev/null", { encoding: 'utf8' });
+    }
     const totalMatch = out.match(/Total banned:\s*(\d+)/);
     const currentMatch = out.match(/Currently banned:\s*(\d+)/);
     const listMatch = out.match(/Banned IP list:\s*(.*)/);
