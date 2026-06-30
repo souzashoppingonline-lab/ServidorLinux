@@ -1874,6 +1874,11 @@ async function processWebhookEvent(topic, resource, userId) {
   const store = db.prepare('SELECT * FROM stores WHERE id=?').get(storeId);
   if (!store) return; // loja não cadastrada neste servidor
 
+  // Log event in ml_events
+  const eventId = db.prepare(
+    'INSERT INTO ml_events(topic,resource,store_id,payload) VALUES(?,?,?,?)'
+  ).run(topic, resource, storeId, JSON.stringify({ topic, resource, userId })).lastInsertRowid;
+
   try {
     if (topic === 'orders_v2') {
       // resource: "/orders/1234567890"
@@ -1935,20 +1940,106 @@ async function processWebhookEvent(topic, resource, userId) {
       broadcast('item_update', { storeId, itemId });
       console.log(`[webhook] items store=${storeId} item=${itemId}`);
 
-    } else if (topic === 'payments' || topic === 'shipments') {
-      // Para pagamentos/envios, reprocessa o pedido vinculado se existir
+    } else if (topic === 'payments') {
       const id = resource.replace(/.*\//, '');
-      const endpoint = topic === 'payments' ? `/collections/notifications/${id}` : `/shipments/${id}`;
-      const data = await mlFetch(endpoint, {}, storeId).catch(() => null);
+      const data = await mlFetch(`/collections/notifications/${id}`, {}, storeId).catch(() => null);
       if (data?.order_id) {
         const o = await mlFetch(`/orders/${data.order_id}`, {}, storeId).catch(() => null);
         if (o?.id) await processWebhookEvent('orders_v2', `/orders/${o.id}`, userId);
       }
-      console.log(`[webhook] ${topic} store=${storeId} id=${id}`);
+      console.log(`[webhook] payments store=${storeId} id=${id}`);
+
+    } else if (topic === 'shipments') {
+      const shipId = resource.replace(/.*\//, '');
+      const data = await mlFetch(`/shipments/${shipId}`, {}, storeId).catch(() => null);
+      if (data) {
+        db.prepare(`INSERT OR REPLACE INTO ml_shipments(
+          id,store_id,order_id,status,substatus,tracking_number,carrier,service_id,
+          date_created,date_first_printed,date_delivered,receiver_name,receiver_city,receiver_state,synced_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,unixepoch())`)
+          .run(
+            String(data.id), storeId,
+            String(data.order_id||''),
+            data.status||'', data.substatus||'',
+            data.tracking_number||'',
+            data.shipping_option?.name||data.carrier||'',
+            String(data.service_id||''),
+            data.date_created||'',
+            data.date_first_printed||'',
+            data.date_delivered||'',
+            data.receiver_address?.receiver_name||'',
+            data.receiver_address?.city?.name||data.receiver_address?.city||'',
+            data.receiver_address?.state?.name||data.receiver_address?.state||''
+          );
+        if (data.order_id) {
+          const o = await mlFetch(`/orders/${data.order_id}`, {}, storeId).catch(() => null);
+          if (o?.id) await processWebhookEvent('orders_v2', `/orders/${o.id}`, userId);
+        }
+      }
+      console.log(`[webhook] shipments store=${storeId} id=${shipId}`);
+
+    } else if (topic === 'claims') {
+      const claimId = resource.replace(/.*\//, '');
+      const data = await mlFetch(`/post/v1/claims/${claimId}`, {}, storeId).catch(() => null);
+      if (data) {
+        db.prepare(`INSERT OR REPLACE INTO ml_claims(
+          id,store_id,order_id,resource_id,reason_id,status,type,date_created,last_updated,resolution,synced_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,unixepoch())`)
+          .run(
+            String(data.id||claimId), storeId,
+            String(data.order_id||data.resource_id||''),
+            String(data.resource_id||''),
+            data.reason_id||'', data.status||'', data.type||'',
+            data.date_created||'', data.last_updated||'',
+            data.resolution ? JSON.stringify(data.resolution) : ''
+          );
+      }
+      console.log(`[webhook] claims store=${storeId} id=${claimId}`);
+
+    } else if (topic === 'messages') {
+      const msgId = resource.replace(/.*\//, '');
+      const data = await mlFetch(`/messages/${msgId}?tag=post_sale`, {}, storeId).catch(() => null);
+      if (data) {
+        db.prepare(`INSERT OR REPLACE INTO ml_messages(
+          id,store_id,pack_id,order_id,from_user_id,from_nickname,to_user_id,text,date_created,status,synced_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,unixepoch())`)
+          .run(
+            String(data.id||msgId), storeId,
+            String(data.pack_id||''),
+            String(data.order_id||''),
+            String(data.from?.user_id||''),
+            data.from?.name||'',
+            String(data.to?.user_id||''),
+            data.text?.plain||data.text||'',
+            data.date_created||'',
+            data.status||''
+          );
+      }
+      console.log(`[webhook] messages store=${storeId} id=${msgId}`);
+
+    } else if (topic === 'items_prices') {
+      const itemId = resource.replace(/.*\//, '');
+      const data = await mlFetch(`/items/${itemId}?attributes=id,price,original_price`, {}, storeId).catch(() => null);
+      if (data?.id) {
+        db.prepare('INSERT INTO price_history(item_id,store_id,price,original_price) VALUES(?,?,?,?)')
+          .run(data.id, storeId, data.price||0, data.original_price||0);
+      }
+      console.log(`[webhook] items_prices store=${storeId} item=${itemId}`);
+
+    } else if (topic === 'items_stock') {
+      const itemId = resource.replace(/.*\//, '');
+      const data = await mlFetch(`/items/${itemId}?attributes=id,available_quantity,sold_quantity`, {}, storeId).catch(() => null);
+      if (data?.id) {
+        db.prepare('INSERT INTO stock_history(item_id,store_id,available_quantity,sold_quantity) VALUES(?,?,?,?)')
+          .run(data.id, storeId, data.available_quantity||0, data.sold_quantity||0);
+      }
+      console.log(`[webhook] items_stock store=${storeId} item=${itemId}`);
     }
 
+    db.prepare('UPDATE ml_events SET processed=1, processed_at=unixepoch() WHERE id=?').run(eventId);
     cacheInvalidate(storeId);
   } catch (e) {
+    db.prepare('UPDATE ml_events SET error=? WHERE id=?').run(e.message.slice(0,500), eventId);
     console.error(`[webhook] erro processando topic=${topic} resource=${resource} store=${storeId}:`, e.message);
   }
 }
@@ -2005,6 +2096,17 @@ route('POST', '/ml/webhook', handleWebhook, true);
 
 // ML also sends notifications to the same callback URL via POST
 route('POST', '/ml/callback', handleWebhook, true);
+
+// Recent ML webhook events
+route('GET', '/api/ml/events', (req, res, sess) => {
+  const p = qp(req);
+  const limit = Math.min(parseInt(p.get('limit') || '50', 10), 200);
+  const onlyUnprocessed = p.get('unprocessed') === '1';
+  const where = onlyUnprocessed ? 'WHERE processed=0' : '';
+  const events = db.prepare(`SELECT id,topic,resource,store_id,processed,processed_at,error,received_at FROM ml_events ${where} ORDER BY received_at DESC LIMIT ?`).all(limit);
+  const counts = db.prepare("SELECT topic, COUNT(*) as total, SUM(processed) as done, SUM(CASE WHEN error!='' THEN 1 ELSE 0 END) as errors FROM ml_events WHERE received_at > unixepoch()-86400 GROUP BY topic").all();
+  ok(res, { events, counts });
+});
 
 // ── Debug (temporary) ──────────────────────────────────────
 route('GET', '/api/debug-session', (req, res) => {
