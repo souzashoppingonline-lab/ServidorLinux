@@ -4083,6 +4083,35 @@ async function renderMonitor() {
     return;
   }
 
+  // Carrega status de webhooks após renderizar
+  setTimeout(async () => {
+    const el = document.getElementById('webhookStatus');
+    if (!el) return;
+    try {
+      const wh = await API.get('/api/ml/webhook-status');
+      const topicLabel = { orders_v2: '🛒 Pedidos', questions: '❓ Perguntas', items: '📦 Itens', payments: '💳 Pagamentos', shipments: '🚚 Envios' };
+      const countsHtml = wh.counts.length
+        ? wh.counts.map(c => `<span style="background:var(--bg);padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600">${topicLabel[c.topic]||c.topic}: <b>${c.n}</b> hoje</span>`).join(' ')
+        : '<span style="color:var(--text-3);font-size:12px">Nenhum webhook recebido nas últimas 24h — clique em "Registrar no ML" para ativar.</span>';
+      const recentHtml = wh.recent.length ? `
+        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:12px">
+          <thead><tr style="color:var(--text-3);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:4px 8px">Tópico</th>
+            <th style="text-align:left;padding:4px 8px">Recurso</th>
+            <th style="text-align:left;padding:4px 8px">Loja</th>
+            <th style="text-align:left;padding:4px 8px">Recebido</th>
+          </tr></thead>
+          <tbody>${wh.recent.map(r => `<tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:4px 8px">${topicLabel[r.topic]||r.topic}</td>
+            <td style="padding:4px 8px;font-family:monospace;color:var(--text-3)">${r.resource}</td>
+            <td style="padding:4px 8px">${r.user_id}</td>
+            <td style="padding:4px 8px;color:var(--text-3)">${new Date(r.received_at*1000).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</td>
+          </tr>`).join('')}</tbody>
+        </table>` : '';
+      el.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">${countsHtml}</div>${recentHtml}`;
+    } catch { el.innerHTML = '<span style="color:var(--text-3);font-size:12px">Erro ao carregar status.</span>'; }
+  }, 100);
+
   const toggle = (key, label, desc = '') => {
     const on = !!cfg[key];
     return `
@@ -4362,7 +4391,21 @@ async function renderMonitor() {
 
     <p style="color:#555;font-size:12px">Status atualizado em ${new Date(status.gerado_em).toLocaleString('pt-BR')} •
       <a href="#" onclick="renderMonitor();return false" style="color:#FFE600;text-decoration:none">↻ Atualizar</a>
-    </p>`;
+    </p>
+
+    <!-- WEBHOOKS REAL-TIME -->
+    <div class="card" style="margin-top:24px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div>
+          <div style="font-size:16px;font-weight:700">⚡ Webhooks — Dados em Tempo Real</div>
+          <div style="font-size:12px;color:var(--text-3);margin-top:2px">
+            O Mercado Livre envia notificações para <code style="background:var(--bg);padding:2px 6px;border-radius:4px">https://multimixvendas.duckdns.org/ml/webhook</code> a cada novo pedido, pergunta ou alteração de item.
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="window.registerWebhooks()" style="white-space:nowrap">📡 Registrar no ML</button>
+      </div>
+      <div id="webhookStatus"><div style="color:var(--text-3);font-size:13px">Carregando...</div></div>
+    </div>`;
 }
 
 window.monitorToggle = function(key) {
@@ -4431,6 +4474,17 @@ window.monitorSendNow = async function() {
     renderMonitor();
   } catch (e) {
     toast('Erro: ' + e.message, 'error');
+  }
+};
+
+window.registerWebhooks = async function() {
+  try {
+    toast('Registrando webhooks no Mercado Livre...', 'default');
+    const r = await API.post('/api/ml/register-notifications', {});
+    toast('✅ Webhooks registrados! Tópicos: ' + (r.topics||[]).join(', '), 'success');
+    renderMonitor();
+  } catch (e) {
+    toast('Erro ao registrar: ' + e.message, 'error');
   }
 };
 

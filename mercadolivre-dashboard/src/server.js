@@ -1761,21 +1761,145 @@ route('POST', '/api/logout', (req, res) => {
   res.end(JSON.stringify({ ok: true }));
 }, true);
 
-// ── ML Webhook (public) ────────────────────────────────────
+// ── ML Webhook — processamento real-time ──────────────────
+// O ML envia: { resource: "/orders/123", user_id: 456, topic: "orders_v2", ... }
+// Respondemos 200 imediatamente e processamos em background para não atrasar o ML.
+
+async function processWebhookEvent(topic, resource, userId) {
+  const storeId = String(userId);
+  const store = db.prepare('SELECT * FROM stores WHERE id=?').get(storeId);
+  if (!store) return; // loja não cadastrada neste servidor
+
+  try {
+    if (topic === 'orders_v2') {
+      // resource: "/orders/1234567890"
+      const orderId = resource.replace(/.*\//, '');
+      const o = await mlFetch(`/orders/${orderId}`, {}, storeId);
+      if (!o?.id) return;
+
+      const addr = o.shipping?.receiver_address || {};
+      const sellerShipping = (o.payments || []).reduce((s, p) => s + (p.shipping_cost || 0), 0);
+      const existing = db.prepare('SELECT id FROM orders WHERE id=?').get(String(o.id));
+
+      db.prepare(`INSERT OR REPLACE INTO orders(id,store_id,status,total_amount,date_created,date_closed,buyer_id,buyer_nickname,shipping_status,receiver_city,receiver_state,receiver_state_code,shipping_cost,shipping_id,buyer_shipping_cost,seller_shipping_cost,pack_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(String(o.id), storeId, o.status, o.total_amount||0, o.date_created, o.date_closed,
+          String(o.buyer?.id||''), o.buyer?.nickname||'', o.shipping?.status||'',
+          addr.city?.name||addr.city||'', addr.state?.name||addr.state||'',
+          addr.state?.id||addr.state_code||'', sellerShipping, String(o.shipping?.id||''),
+          0, sellerShipping, String(o.pack_id||''));
+
+      db.prepare('DELETE FROM order_items WHERE order_id=?').run(String(o.id));
+      const insertItem = db.prepare(`INSERT INTO order_items(order_id,store_id,item_id,item_title,quantity,unit_price,category_id,sale_fee) VALUES(?,?,?,?,?,?,?,?)`);
+      for (const item of (o.order_items||[])) {
+        insertItem.run(String(o.id), storeId, item.item?.id||'', item.item?.title||'', item.quantity||1, item.unit_price||0, item.item?.category_id||'', item.sale_fee||0);
+      }
+
+      // Alerta Telegram para pedido novo
+      if (!existing && o.status === 'paid' && monitorGet('enabled', false) && monitorGet('alert_pedido_novo', true)) {
+        const tgToken = monitorGet('telegram_token', '');
+        const tgChat  = monitorGet('telegram_chat_id', '');
+        if (tgToken && tgChat) {
+          const firstItem  = (o.order_items||[])[0];
+          const itemTitle  = firstItem?.item?.title || 'Produto';
+          const shortTitle = itemTitle.length > 40 ? itemTitle.slice(0, 40) + '…' : itemTitle;
+          const qtd        = (o.order_items||[]).reduce((s, i) => s + (i.quantity||1), 0);
+          const msg = `🛒 <b>Novo Pedido!</b>\n👤 ${o.buyer?.nickname||'Comprador'}\n📦 ${shortTitle}${qtd>1?` (${qtd} un.)`:''}\n💰 <b>R$ ${(o.total_amount||0).toFixed(2).replace('.',',')}</b>\n🏪 ${store.nickname}`;
+          sendTelegram(tgToken, tgChat, msg).catch(() => {});
+        }
+      }
+
+      broadcast('order_update', { storeId, orderId: String(o.id), status: o.status });
+      console.log(`[webhook] orders_v2 store=${storeId} order=${o.id} status=${o.status}`);
+
+    } else if (topic === 'questions') {
+      // resource: "/questions/1234567890"
+      const qId = resource.replace(/.*\//, '');
+      const q = await mlFetch(`/questions/${qId}`, {}, storeId);
+      if (!q?.id) return;
+
+      db.prepare(`INSERT OR REPLACE INTO questions_sync(id,store_id,item_id,item_title,buyer_nickname,text,status,date_created,answer_text,answer_date) VALUES(?,?,?,?,?,?,?,?,?,?)`)
+        .run(String(q.id), storeId, q.item_id||'', '', q.from?.nickname||'', q.text||'', q.status||'UNANSWERED', q.date_created||'', q.answer?.text||'', q.answer?.date_created||'');
+
+      broadcast('question_update', { storeId, questionId: String(q.id), status: q.status });
+      console.log(`[webhook] questions store=${storeId} question=${q.id} status=${q.status}`);
+
+    } else if (topic === 'items') {
+      // resource: "/items/MLB123"
+      const itemId = resource.replace(/.*\//, '');
+      await processItemBatch(storeId, [itemId]);
+      broadcast('item_update', { storeId, itemId });
+      console.log(`[webhook] items store=${storeId} item=${itemId}`);
+
+    } else if (topic === 'payments' || topic === 'shipments') {
+      // Para pagamentos/envios, reprocessa o pedido vinculado se existir
+      const id = resource.replace(/.*\//, '');
+      const endpoint = topic === 'payments' ? `/collections/notifications/${id}` : `/shipments/${id}`;
+      const data = await mlFetch(endpoint, {}, storeId).catch(() => null);
+      if (data?.order_id) {
+        const o = await mlFetch(`/orders/${data.order_id}`, {}, storeId).catch(() => null);
+        if (o?.id) await processWebhookEvent('orders_v2', `/orders/${o.id}`, userId);
+      }
+      console.log(`[webhook] ${topic} store=${storeId} id=${id}`);
+    }
+
+    cacheInvalidate(storeId);
+  } catch (e) {
+    console.error(`[webhook] erro processando topic=${topic} resource=${resource} store=${storeId}:`, e.message);
+  }
+}
+
 async function handleWebhook(req, res) {
   const body = await readBody(req).catch(() => ({}));
-  db.prepare('INSERT INTO webhooks(topic,resource,user_id,payload) VALUES(?,?,?,?)')
-    .run(body.topic || '', body.resource || '', String(body.user_id || ''), JSON.stringify(body));
-  if (body.user_id) cacheInvalidate(String(body.user_id));
-  broadcast('webhook', { topic: body.topic, resource: body.resource });
+  // Responde 200 imediatamente (ML exige resposta rápida ou vai retentar)
   ok(res, { ok: true });
+
+  if (!body.topic || !body.resource || !body.user_id) return;
+
+  db.prepare('INSERT INTO webhooks(topic,resource,user_id,payload) VALUES(?,?,?,?)')
+    .run(body.topic, body.resource, String(body.user_id), JSON.stringify(body));
+
+  broadcast('webhook', { topic: body.topic, resource: body.resource, userId: String(body.user_id) });
+
+  // Processa em background sem bloquear
+  setImmediate(() => processWebhookEvent(body.topic, body.resource, body.user_id));
 }
+
+// Rota para registrar URL de notificação no app ML (chama PUT /applications/{app_id})
+route('POST', '/api/ml/register-notifications', async (req, res, sess) => {
+  const NOTIFICATION_URL = 'https://multimixvendas.duckdns.org/ml/webhook';
+  const TOPICS = ['orders_v2', 'questions', 'items', 'payments', 'shipments'];
+
+  // Usa o token de qualquer loja ativa para chamar a API do app
+  const store = db.prepare("SELECT * FROM stores WHERE status='active' LIMIT 1").get();
+  if (!store) return fail(res, 'Nenhuma loja ativa encontrada', 400);
+
+  try {
+    const token = await ensureFreshToken(store);
+    const mlRes = await fetch(`${ML_API}/applications/${ML_APP_ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ notification_url: NOTIFICATION_URL, topics: TOPICS }),
+    });
+    const data = await mlRes.json();
+    if (!mlRes.ok) return fail(res, `ML API: ${JSON.stringify(data)}`, 400);
+    ok(res, { ok: true, notification_url: data.notification_url, topics: data.topics });
+  } catch (e) {
+    fail(res, e.message, 500);
+  }
+});
+
+// Status dos webhooks
+route('GET', '/api/ml/webhook-status', (req, res, sess) => {
+  const recent = db.prepare('SELECT topic, resource, user_id, received_at FROM webhooks ORDER BY received_at DESC LIMIT 20').all();
+  const counts = db.prepare("SELECT topic, COUNT(*) as n FROM webhooks WHERE received_at > unixepoch()-86400 GROUP BY topic").all();
+  ok(res, { recent, counts, url: 'https://multimixvendas.duckdns.org/ml/webhook' });
+});
 
 // Webhook at dedicated path
 route('POST', '/ml/webhook', handleWebhook, true);
 
 // ML also sends notifications to the same callback URL via POST
-// (when both fields point to the same URL)
 route('POST', '/ml/callback', handleWebhook, true);
 
 // ── Debug (temporary) ──────────────────────────────────────
